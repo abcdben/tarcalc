@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Technical write-up of the contamination study: six collections at graded public exposure, four systems, three tests (case knowledge, document memorisation, knowledge effect under rename-and-subtract), four generalisation checks, a renamer audit and the decisions taken along the way.">
+<title>Training-data contamination in LLM relevance review — technical write-up</title>
+<style>
+:root{--ink:#1d2430;--mute:#5b6572;--rule:#e3e7ec;--bg:#fbfbfc;--card:#fff;--acc:#2a5db0;--warm:#b4623a;--ok:#2e7d4f;--warn:#b26a00}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:64px}
+body{margin:0;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--ink);background:var(--bg)}
+nav{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);border-bottom:1px solid var(--rule);backdrop-filter:saturate(1.2) blur(4px)}
+nav .in{max-width:1180px;margin:0 auto;padding:8px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px}
+nav a{color:var(--mute);text-decoration:none;white-space:nowrap}
+nav a:hover{color:var(--acc)}
+nav a.home,nav a.gal{border:1px solid var(--rule);border-radius:6px;padding:2px 9px;color:var(--ink)}
+nav a.gal{margin-left:auto}
+main{max-width:1180px;margin:0 auto;padding:24px 20px 80px}
+h1{font-size:30px;line-height:1.2;margin:8px 0 4px}
+h2{font-size:22px;margin:56px 0 12px;padding-top:12px;border-top:2px solid var(--ink)}
+h3{font-size:17px;margin:28px 0 8px}
+h4{font-size:15px;margin:20px 0 6px;color:var(--mute);text-transform:uppercase;letter-spacing:.03em}
+p,li{max-width:78ch}
+.lede{font-size:18px;color:var(--mute);max-width:80ch}
+.meta{font-size:13px;color:var(--mute);margin-bottom:28px}
+.box{background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:14px 18px;margin:16px 0}
+.box.key{border-left:4px solid var(--acc)}
+.box.warn{border-left:4px solid var(--warn)}
+.box.ok{border-left:4px solid var(--ok)}
+figure{margin:22px 0;background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:12px}
+figure img{display:block;max-width:100%;height:auto;margin:0 auto}
+figcaption{font-size:13.5px;color:var(--mute);margin-top:10px;line-height:1.5}
+figcaption b{color:var(--ink)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media (max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+.grid2 figure,.grid3 figure{margin:0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin:12px 0;background:var(--card)}
+th,td{border:1px solid var(--rule);padding:6px 9px;text-align:left;vertical-align:top}
+th{background:#f1f4f8;font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.sig{font-weight:600;color:var(--warm)}
+details{margin:12px 0;border:1px solid var(--rule);border-radius:8px;background:var(--card)}
+summary{cursor:pointer;padding:10px 14px;font-weight:600;font-size:14px}
+details>div{padding:4px 14px 14px}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+code{background:#eef1f5;padding:1px 5px;border-radius:4px}
+pre{background:#1e242c;color:#e8ecf1;padding:12px 14px;border-radius:8px;overflow:auto;line-height:1.45}
+pre code{background:none;color:inherit;padding:0}
+.chip{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;padding:1px 7px;border-radius:999px;border:1px solid;margin-left:6px;vertical-align:middle}
+.chip.floor{color:var(--ok);border-color:var(--ok)}
+.chip.pub{color:#1b7a86;border-color:#1b7a86}
+.chip.post{color:#7a4ea8;border-color:#7a4ea8}
+.chip.ceil{color:var(--warm);border-color:var(--warm)}
+dl.dec dt{font-weight:600;margin-top:14px}
+dl.dec dd{margin:2px 0 0 0;color:var(--ink)}
+dl.dec dd .why{color:var(--mute)}
+.small{font-size:13px;color:var(--mute)}
+ol.log li{margin:8px 0}
+.toc{columns:2;font-size:14px;margin:12px 0 0}
+@media (max-width:900px){.toc{columns:1}}
+mark{background:#fff3b0;padding:0 .15em;border-radius:2px;color:inherit}
+</style>
+</head>
+<body>
+<nav><div class="in">
+<a class="home" href="../" title="The landing page: every page of the site">Home</a><a href="#s1">1 Purpose</a><a href="#s2">2 Systems</a><a href="#s3">3 Case knowledge</a><a href="#s4">4 Memorisation</a><a href="#s5">5 Knowledge effect</a><a href="#s6">6 Checks A–D</a><a href="#s7">7 Renamer audit</a><a href="#s8">8 Decision log</a><a href="#s9">9 Costs</a><a href="#s10">10 Open items &amp; repro</a><a class="gal" href="gallery.html" title="Every figure of the project, by what it measures">Figure gallery</a>
+</div></nav>
+<main>
+
+<h1>Does an LLM's prior exposure to a collection change its relevance-review score?</h1>
+<p class="lede">Technical write-up of the contamination study in <code>jev-eval</code>: six collections at graded exposure, four systems, three tests (case knowledge, document memorisation, knowledge effect under rename-and-subtract), four generalisation checks, a renamer audit, and the decisions taken along the way.</p>
+<p class="meta">Prepared 2026-10-07 for the applied-science reader. Every number is taken from <code>design/06_contamination_probe.md</code>, <code>design/07_ablation_round2.md</code>, <code>results/contam/</code>, <code>results/ablation/</code>, <code>results/verify/</code> and <code>results/jev_probe/</code>; nothing here is estimated from memory. Figures are the project's own PNGs; relative paths resolve from <code>results/contam/</code>. <mark>Total project spend $300.09.</mark></p>
+
+<div class="box key">
+<b>One-paragraph result.</b> Across Enron, Jeb Bush and CUAD, under three manipulations (rename every name, paraphrase the text, inject a case brief), knowing the case changed review F1 by at most a few points for the three GPT-5.6 models: <mark>knowledge effects within ±2.6 F1, one of nine LLM intervals off zero (Terra on Jeb Bush, −2.3 [−4.3, −0.3])</mark>. The models know the <em>cases</em> thoroughly (80–90 % of a fact checklist on Enron, 100 % identification of nameless sketches) but show no document-level memorisation of any e-mail collection (finish-the-passage overlap at the synthetic floor; longest exact runs 2–4 words; CUAD contracts are the exception at 10 % of windows with a ≥ 15-word run for Sol). Renaming is a weak blindfold: the renamed Enron and Jeb Bush e-mails were still attributed to the right company or office 60–94 % of the time, so every knowledge effect is a lower bound. Jev, the decision model, carries real-world knowledge of the matters at effect sizes comparable to the LLMs (code-name swap) and a small, real familiarity effect on Jeb Bush (−3.1 [−5.5, −0.8]), with no sign of memorised documents or labels. One renamer defect (Veridian v1) produced a spurious 2–3-point "renaming cost" and three spurious significant contrasts; it was found by audit, fixed and re-run, and the headline did not move.
+</div>
+
+<div class="toc">
+<b>Contents</b><br>
+<a href="#s1">1. Purpose, question, exposure typology</a><br>
+<a href="#s2">2. Systems, prompts, labels, costs per call</a><br>
+<a href="#s3">3. Test 1 — do the models know the cases?</a><br>
+<a href="#s4">4. Test 2 — have they memorised the documents?</a><br>
+<a href="#s5">5. Test 3 — does knowing the case change the score?</a><br>
+<a href="#s6">6. Generalisation checks A–D</a><br>
+<a href="#s7">7. Renamer audit</a><br>
+<a href="#s8">8. Decision log</a><br>
+<a href="#s9">9. Costs</a><br>
+<a href="#s10">10. Open items, next experiments, reproduction, file map</a>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="s1">1. Purpose, research question, exposure typology</h2>
+
+<p>The main eval compares Jev (a commercial relevance-review decision model) with generative LLMs on document review across several corpora. Four of those corpora are public and old enough to have been in a frontier model's pre-training data; the two e-mail collections most used in eDiscovery research (Enron, Jeb Bush) were posted on the open web long before any of these models were trained. The question this study answers is narrow and operational:</p>
+
+<div class="box"><b>Research question.</b> If a system has been exposed to a collection, to the cast of people in it, to the benchmark that reuses it, to its published relevance judgments, or to the <em>matter</em> behind it (the litigation, its facts and players), <mark>does that exposure change the system's relevance-review score on that collection in a way that would not transfer to a client's never-seen matter?</mark> Measure the exposure per channel; then measure its consequence for F1.</div>
+
+<p>The design separates <em>exposure</em> (what the model knows; Tests 1 and 2) from <em>effect</em> (what that knowledge does to the score; Test 3). The first is cheap to measure with short prompts and no document classification; the second needs paired classification runs. Both are read against a floor (a collection no model can know) and, for exposure, a ceiling (text every model has certainly memorised).</p>
+
+<h3>Six collections at graded exposure</h3>
+<table>
+<tr><th>Collection</th><th>Documents</th><th>Case public?</th><th>Documents public?</th><th>Public since</th><th>Role</th></tr>
+<tr><td>Enron (EDRM v2; TREC Legal 2009 Complaint J, 2010 Complaint K)</td><td>994 + 999 e-mails sampled</td><td>Yes — among the most-documented frauds in U.S. history</td><td>Yes — a component of The Pile, Kaggle, two decades of papers</td><td>2003–2009</td><td>Most-exposed case; same mailbox under two complaints gives a within-corpus control</td></tr>
+<tr><td>Jeb Bush e-mails (TREC 2016 Total Recall, athome4)</td><td>1,000 of the 3,116-e-mail eval sample</td><td>Yes — the governorship, the recount, Schiavo</td><td>Yes — posted by the campaign in 2015; NIST copy agreement-restricted</td><td>2015–2016</td><td>Familiar matter, unfamiliar documents</td></tr>
+<tr><td>Mallinckrodt opioid e-mails (OIDA)</td><td>1,840</td><td>Yes — MDL 2804, the 2020 Chapter 11</td><td>Yes — UCSF/JHU archive behind a Solr search</td><td>2021–2023</td><td>Less-narrated real matter; brief-injection arm</td></tr>
+<tr><td>Endo opioid e-mails (OIDA) <span class="chip post">POST-CUTOFF</span></td><td>2,000</td><td>Yes — Opana ER, state AGs, 2022 Chapter 11</td><td><b>No</b> — production published after every model's training cutoff</td><td>2024–2026</td><td>Known case, unseen documents: the real-world floor for document memorisation</td></tr>
+<tr><td>CUAD contracts (Atticus)</td><td>102 contracts, 1,200 excerpts sampled</td><td>No case — clause-type benchmark</td><td>Yes — EDGAR exhibits, heavily crawled; a well-known NLP benchmark</td><td>2021</td><td>Public documents, no case; the one collection with document-level memorisation</td></tr>
+<tr><td>Big Thorium (Relativity aiR for Review demo) <span class="chip pub">PUBLIC, INVENTED</span></td><td>1,000 of 2,091</td><td>No — fictional City of Atlantis bribery matter</td><td>Yes — distributed by Relativity to customers and demo users</td><td>2024–</td><td>Public documents, invented case: a second floor on which document exposure is possible</td></tr>
+<tr><td>Veridian (synthetic, written 2026-09) <span class="chip floor">FLOOR</span></td><td>1,000 of 1,954</td><td>No — invented ApexHip MDL</td><td>No — written for this study</td><td>—</td><td>Negative control: what a model scores knowing nothing</td></tr>
+<tr><td>Founding documents (Federalist Papers, Constitution, Declaration) and Kaggle Titanic <span class="chip ceil">CEILING</span></td><td>60 windows; 20 CSV chunks</td><td>—</td><td>Among the most-replicated texts on the web</td><td>1787; 2012</td><td>Positive control: what memorised text looks like per model</td></tr>
+</table>
+
+<p>Two kinds of knowing fall out of this typology and the study keeps them apart throughout. <b>Knowing the documents</b> (verbatim memorisation, knowing the cast, knowing the benchmark's topics, knowing the published labels) is what the word "contamination" usually means. <b>Knowing the case</b> (recognising the matter from a nameless sketch, recalling its record, knowing what responsive documents will contain before opening one) is the channel specific to eDiscovery, since four of the six collections come from famous litigation. The grid below is the study's summary of both.</p>
+
+<figure>
+<img src="article/two_kinds_grid.png" alt="Two kinds of knowing grid">
+<figcaption><b>Figure 1. Two kinds of knowing, per collection.</b> Warm cells are document-level channels (finish-the-document LCS-F1 to the ceiling; entity recall; label recall from id alone; benchmark-topic recall), cool cells are case-level channels (nameless-sketch identification; fact-checklist recall relative to the U.S. v. Microsoft ceiling; discriminative search terms volunteered before seeing a document), each scaled 0–100 between the Veridian floor and the relevant ceiling, averaged over the three GPT-5.6 models. Dotted = not measurable for that collection. Reading: every e-mail collection is known as a <em>case</em> and unknown as <em>documents</em>; CUAD is the reverse; Veridian and Big Thorium sit at zero on the case side. Big Thorium's 15 on "finish the document" is predictability of machine-written prose, not memorisation (§4).</figcaption>
+</figure>
+
+<figure>
+<img src="article/documents_vs_case.png" alt="Documents vs case dials">
+<figcaption><b>Figure 2. The same two scores as paired dials per collection</b> (<code>doc_score</code> = mean of the V, E, L, B channels; <code>case_score</code> = mean of M0, M1, M2; each channel placed between the Veridian floor at 0 and its ceiling at 100, clipped). This is the <code>summary["composite"]</code> object rendered in the contamination report's overview and the paper's Table 2. Equal channel weights are a stated choice; the split exists because the overall mean hides the main finding.</figcaption>
+</figure>
+
+<h3>Why three tests and not one</h3>
+<p>Each test answers a question the others cannot. A verbatim probe (Test 2) that finds nothing clears a corpus only at the document level; a model can know the Enron fraud cold without being able to finish a single Enron e-mail, and that knowledge could still tell it what responsive documents look like. The case-knowledge probes (Test 1) measure that channel but say nothing about whether it <em>does</em> anything. Test 3 measures the consequence directly, by removing the names (or paraphrasing the text, or injecting a brief) and measuring the paired change in F1. The three are read together: <mark>exposure is common at the matter level and rare at the document level for internal e-mail, and we could not detect a consequence of the former for review accuracy beyond a few F1 points</mark>.</p>
+
+<!-- ================================================================ -->
+<h2 id="s2">2. Systems, prompts, labels, per-call cost</h2>
+
+<table>
+<tr><th>System</th><th>What it is</th><th>Provider / setting</th><th>Which tests</th></tr>
+<tr><td>GPT-5.6 Luna</td><td>Small generative LLM</td><td rowspan="3">OpenAI Responses API, <code>reasoning.effort=none</code>, temperature 0, flex tier with prompt caching for the classification runs; list prices for the probes. This is the "fast classifier" configuration the main eval ran, so the exposure measured is the exposure of the configuration under test.</td><td>All probes, all ablation arms, checks A–D, T1/T2 (as positive comparison), paraphraser and tagger (Luna), fidelity judge (Terra)</td></tr>
+<tr><td>GPT-5.6 Terra</td><td>Mid generative LLM</td><td>Same; added to round 2 on 2026-10-06 after the key was topped up</td></tr>
+<tr><td>GPT-5.6 Sol</td><td>Large generative LLM</td><td>Same; the model with the most training data and the strongest memorisation signal on every control</td></tr>
+<tr><td>Jev (<code>jev@base</code>, jev-1.13.0)</td><td>Commercial relevance-review decision model (a classifier returning a label and a probability; not generative)</td><td>TypeSafe API. Recipe fixed on the Veridian dev split (<code>design/05</code>): Noul question form, prose criteria, RFP phrasing, matter context, structured state. Vendor states it is trained on synthetic data, not pre-trained on public text — treated as a claim under test throughout.</td><td>Ablation arms (all), M3 header-only relevance, classifier-native tests T1–T4, checks A, C, D. The generative probes cannot be posed to it.</td></tr>
+</table>
+
+<p>Anthropic and Gemini keys were absent from <code>.env</code> at every run; <code>bench contam-run</code> and the ablation runners are resumable and will fill those rosters when keys exist. Claude Sonnet 5 and Gemini 3.8 Flash appear only in Check B's roster table, from the main study's existing results.</p>
+
+<h3>Prompts</h3>
+<ul>
+<li><b>Classification (ablation, checks, Big Thorium).</b> The main study's multi-arm prompt: the matter context paragraph from the task YAML, every request for the collection with its positive/negative descriptions, then the document (headers + body). One call per document returns a label and probability per request. The renamed condition passes the context and requests through the same renamer as the documents (<code>data/ablation/<i>arm</i>__renamed.yaml</code>, <code>mapping.json["contexts"]</code>); the named condition appends a one-line note stating the company (Enron: "The Company is Enron Corp.; the e-mails are from the Enron corpus (the complaint refers to the Company by the pseudonym 'Volteron')"; renamed: "The Company is Volteron Corp."). EDRM production headers <code>X-SDOC</code>/<code>X-ZLID</code> are stripped from both Enron conditions after the leak check showed models naming Enron from them.</li>
+<li><b>Probes</b> (§3–§4) are short single-turn prompts with no document classification; item construction is deterministic (<code>bench contam-build</code>, seed 7; Part II <code>matter_items(rng seed+4)</code>).</li>
+<li><b>Jev</b> receives a TaskSet per request set: context, the request text, positive/negative descriptions as criteria, the document as state. The OpenAI provider sends <code>rfp_text</code> plus the descriptions; Jev base uses the descriptions; neither uses the <code>structured</code>/<code>subparts</code> fields, which matters for the Jeb Bush audit (§7).</li>
+</ul>
+
+<h3>Label sources and the gray rule</h3>
+<table>
+<tr><th>Collection</th><th>Gold</th><th>Notes</th></tr>
+<tr><td>Enron J / K</td><td>TREC Legal 2010 learning-task qrels (J, requests 201–207, one judged request per document) and 2009 qrels (K, 301–303)</td><td>Human assessors; prevalence ≈ 49–50 % in the sampled sets</td></tr>
+<tr><td>Jeb Bush</td><td>TREC 2016 athome4 qrels for the matter and control topics; athome1 complete judgments for <code>a1_terri_schiavo</code></td><td>Human; prevalence 3 % in the full eval sample, enriched to ≤ 60 positives per request in the ablation sample</td></tr>
+<tr><td>CUAD</td><td>Expert span annotations → excerpt-level positive if a labelled span overlaps the excerpt</td><td>Human; 718 of 6,494 excerpts carry a positive</td></tr>
+<tr><td>Mallinckrodt</td><td>Three-model LLM panel (Claude Sonnet 5, GPT-5.6 Terra, Gemini 3.8 Flash); unanimous = label, split = gray</td><td>Terra is a panel member → its MNK score is partly circular (marked † in Check B)</td></tr>
+<tr><td>Endo</td><td>Three-OpenAI-model panel (Luna, Terra, Sol)</td><td>All three LLMs are the gold → Endo is excluded from the rank-stability reading</td></tr>
+<tr><td>Veridian</td><td>Spec labels from the synthetic manifest, relabelled at spec level and text-audited by the mid-tier LLMs; gray flag per (doc, request)</td><td>Planner gold; no system feeds it</td></tr>
+<tr><td>Big Thorium</td><td>Leave-one-out panel: for each LLM the other two must agree (split = unscored, 109–141 pairs per system); for Jev the three-model majority with the goldify gray rule (split or mean p ∈ [0.35, 0.65] unscored)</td><td>The demo's own coding (1,000 docs, 18 positives, one coder) is a sanity check only: panel recall of those 18 at document level = 15/18</td></tr>
+</table>
+<p>"Gray" pairs (ambiguous by construction: a split panel or a borderline Veridian spec) are excluded from the headline F1 but kept in the files; gray-excluded deltas are reported beside the all-gold ones wherever they differ (Check D: 0.0 / −1.2 / −0.6 / −0.0 vs −0.3 / −0.6 / −1.0 / +0.5).</p>
+
+<h3>Statistics</h3>
+<p>Every ablation delta is <em>paired by document</em>: the same document is classified in both conditions, and <mark>the bootstrap resamples documents (clusters), not decisions</mark> — 2,000 draws for the ablation and checks, 1,000 for the PR small-multiple figures, 500 for the per-request tables. CUAD clusters by contract (102 clusters), because renaming is a per-contract treatment. Knowledge effects are differences of bootstrap delta distributions drawn jointly (matter and control requests on the same resampled documents). Exact McNemar on discordant decisions accompanies each delta. Verbatim comparisons against the floor use one-sided Mann–Whitney over items. A dagger (†) marks a 95 % interval that excludes zero.</p>
+
+<h3>Per-call cost (realised, flex tier, cached prefix)</h3>
+<table>
+<tr><th>Arm (one call = one document × all requests)</th><th class="n">Luna</th><th class="n">Terra</th><th class="n">Sol</th><th class="n">Jev</th></tr>
+<tr><td>Veridian multi (10 requests; 1,000 docs = $14.21)</td><td class="n">$0.00047</td><td class="n">$0.0047</td><td class="n">$0.0089</td><td class="n">$0.00015</td></tr>
+<tr><td>CUAD (12 requests, 1,200 excerpts)</td><td class="n">$0.00039</td><td class="n">$0.0039</td><td class="n">$0.0074</td><td class="n">$0.00011</td></tr>
+<tr><td>Jeb Bush (12 requests, 1,000 e-mails)</td><td class="n">$0.0005</td><td class="n">$0.0050</td><td class="n">$0.0095</td><td class="n">$0.00016</td></tr>
+<tr><td>Big Thorium (8 requests, 1,000 e-mails; longer documents, lower cache hit)</td><td class="n">$0.00047</td><td class="n">$0.0047</td><td class="n">$0.0089</td><td class="n">$0.00012</td></tr>
+<tr><td>Contamination probe battery, Part I (1,781 items, list price)</td><td class="n">$0.12</td><td class="n">$1.08</td><td class="n">$2.12</td><td class="n">—</td></tr>
+</table>
+<p class="small">List prices are about 2.6× the paid (flex + cache) figures. <mark>A full four-system renamed arm on a 1,000-document e-mail set therefore costs $14–15 realised</mark>; the same on list would be ≈ $37.</p>
+
+<!-- ================================================================ -->
+<h2 id="s3">3. Test 1 — do the models know the cases?</h2>
+
+<p>Part II of the probe battery asks four questions about each matter, each with its own probe. Items are built deterministically; scoring is keyword-based against hand-written answer keys and fact checklists, with each fact flagged <code>in_context</code> if the study's own task context already states it, so a "beyond-context" share is reported separately and an answer that echoes the prompt earns nothing.</p>
+
+<table>
+<tr><th>Probe</th><th>Question</th><th>Scoring</th><th>Items</th></tr>
+<tr><td><b>M0</b> matter identification</td><td>A de-identified sketch (or TREC's own pseudonymised complaint) → "which real company or case is this?"</td><td>Answer key per matter; Veridian scored against a list of real templates (DePuy ASR, Zimmer, Stryker, …)</td><td>6 per model</td></tr>
+<tr><td><b>M1</b> matter recall</td><td>"Describe {matter}" in ≤ 400 words</td><td>Share of a 16–20-fact checklist in five categories (parties, allegations, people, events, outcome); whole-word matching</td><td>5 per model</td></tr>
+<tr><td><b>M2</b> evidence prior</td><td>Given matter + request, list 25 terms expected in responsive documents</td><td>Terms already in the prompt discarded; each remaining term scored against the labelled corpus as <em>grounded</em> (≥ 2 judged docs) and <em>discriminative</em> (≥ 2 responsive docs, lift ≥ 2). Named terms (proper nouns) are the case-knowledge signal; generic keywords are vocabulary</td><td>52 (6 request sets)</td></tr>
+<tr><td><b>M3</b> metadata-only relevance</td><td>Relevance from Date/From/To/Cc/Subject vs Date/Subject only, paired on 20 + 20 balanced documents per request</td><td>Δ accuracy (headers − subject) with paired bootstrap; lexical baseline. The only probe that fits Jev's interface, so it was run on Jev too (2,900 calls, $0.17)</td><td>≈ 2,900 per model</td></tr>
+</table>
+
+<h3>Results (Luna / Terra / Sol)</h3>
+<ul>
+<li><b>M0 — pseudonyms do not hold.</b> Every real matter is identified from its fact pattern: TREC's Complaint K ("Bleak Horizon") → Deepwater Horizon with BP/Transocean/Halliburton supplied unprompted; the nameless Mallinckrodt, Jeb Bush and Microsoft sketches named immediately; Complaint J ("Volteron") → Enron for Luna and Terra, Reliant Energy for Sol (wrong company, same conclusion). Over the full ladder, <mark>26 of 27 real matters were identified from nameless sketches; the one miss is Sol on Complaint J</mark>. On Veridian, Luna and Terra confidently assert it is Zimmer Biomet; Sol correctly calls it a composite or fabricated matter.</li>
+<li><b>M1 — how much of the record is in the model.</b> <mark>Enron 85 / 80 / 90 % of the checklist (93 / 93 / 100 % beyond context), on a par with the U.S. v. Microsoft ceiling (88 / 94 / 88 %)</mark>. The two Enron items every model misses are document shredding and the California trading schemes — the operational facts TREC topics 204–205 target. Mallinckrodt 48 / 43 / 52 % (procedural story known; operational allegations ≈ 17 %). Jeb Bush 50 / 44 / 67 % with the <em>people</em> category at 0 % for every model. Endo 70 / 55 / 70 %. Veridian: all three say "unknown", no confabulation.</li>
+<li><b>M2 — is the knowledge actionable?</b> Under TREC's pseudonym the Enron scandal requests yield 1 / 2 / 0 discriminative named terms in total. <mark>Name the company and the same requests yield <b>12 / 24 / 46</b> discriminative named terms</mark> (Sol: Mahonia / Yosemite / Delta for prepay; Raptor I–IV, Talon, Chewco for FAS 140; Duncan, Temple, Odom for document destruction), each 2.7–11.7× over-represented among responsive documents. Complaint K on the same mailbox: 3 / 0 / 1. Jeb Bush 16 / 18 / 19; Mallinckrodt 2 / 1 / 4; Veridian 0 / 2 / 3 (all domain institutions). Generic keywords discriminate at 20–40 % on every corpus including Veridian — vocabulary, not case knowledge.</li>
+<li><b>M3 — knowing the people barely moves the metadata call.</b> Subject-only accuracy is already 68–86 % on the real corpora against a lexical baseline of 52–64 %; adding From/To/Cc changes it by −1 to +5 points, and only Sol on Enron J (+2.5 [0.4, 5.0]) and Jeb Bush (+2.7 [0.9, 4.8]) exclude zero. Jev on the same e-mails: Δ +0.4 to +4.2, no interval off zero. Veridian's subject-only accuracy is 90–94 %, higher than any real corpus: a realism caveat on the synthetic set found for free.</li>
+</ul>
+
+<figure>
+<img src="article/awareness_scatter.png" alt="Case awareness vs document awareness">
+<figcaption><b>Figure 3. Case awareness against document awareness, one point per collection × model.</b> Every e-mail collection sits top-left (case known, documents not); CUAD sits on the document axis; Veridian and Big Thorium at the origin. The figure is the two composite scores of Figure 2 as coordinates.</figcaption>
+</figure>
+
+<h3>The ladder: calibrating case recall against public footprint</h3>
+<p>Two anchors fix the ends of the case-knowledge scale but not its shape, so <code>ediscovery_bench/contam/ladder.py</code> adds 22 real matters from the last ~90 years as calibration rungs, chosen in families mirroring the corpora (accounting fraud: WorldCom, HealthSouth, Peregrine, Equity Funding 1973, McKesson & Robbins 1938; opioids: Purdue, Insys, Rochester Drug, Teva/Actavis, JUUL; e-mail in public life: Clinton server, Bridgegate, Sony hack; device torts: Dalkon Shield, DePuy ASR, 3M earplugs, Bair Hugger; landmarks: Bhopal, Texaco v. Pennzoil, Dieselgate, Theranos, FTX; post-cutoff controls: SEC v. Meyer Global 2026, SEC v. Near Intelligence 2026). Each rung gets the same M0 sketch and M1 checklist treatment; facts the question itself states are excluded from the headline share. An independent exposure proxy is recorded per matter: English-Wikipedia article length, language editions and twelve-month pageviews (<code>data/contam/raw/wiki_footprint.json</code>).</p>
+
+<figure>
+<img src="article/ladder.png" alt="The matter ladder">
+<figcaption><b>Figure 4. The ladder: share of beyond-question checklist facts recalled, per matter, three models</b>, with the study's own matters placed among the rungs and Big Thorium / Veridian at the bottom. Top group (Bhopal, Clinton server, Bridgegate, WorldCom, Theranos, Microsoft, Enron, Dieselgate, FTX) at 76–100 %; study matters: Jeb Bush 50/44/67 %, Mallinckrodt 40/33/47 % (the least-known real matter on the ladder for every model); post-cutoff Meyer 0/0/0 with all three declining. Three readings: the floor for a real litigated matter is high (nothing charged, tried or settled in public comes out blank, including matters with no Wikipedia article); scale flattens the ladder; identification is nearly binary and precedes recall.</figcaption>
+</figure>
+
+<figure>
+<img src="article/ladder_footprint.png" alt="Recall vs Wikipedia pageviews">
+<figcaption><b>Figure 5. Recall share against log twelve-month Wikipedia pageviews, 25 matters with an article.</b> Each matter appears once per model; only the study's four matters, the Microsoft ceiling and three anchors (Clinton e-mail server, Bhopal, Purdue) are labelled, the other 17 rungs are the faint points (all named in the ladder table). The three lines are least-squares fits of recall on log pageviews, one per model. Spearman ρ: Luna +0.48 (p = 0.015), Terra +0.48 (p = 0.014), Sol +0.25 (p = 0.22, n.s.). Public footprint predicts case recall for the small and mid models and barely for the largest, whose line is nearly flat; it recalls several little-read matters well — though not Mallinckrodt (44 %). Veridian, Big Thorium and the post-cutoff rungs have no article and are omitted. An earlier version labelled every rung (<code>ladder_footprint.v1_cluttered.png</code>); a per-model small-multiples version is in <code>article/footprint_options/optionB.png</code>.</figcaption>
+</figure>
+
+<h3>Jev: the code-name swap (T1) and why v1 was confounded</h3>
+<p>The generative probes cannot be posed to a classifier, so Jev's case knowledge is measured through its own interface (<code>ediscovery_bench/jevprobe/</code>). <b>T1</b> uses 40 templated documents per matter (Enron, Jeb Bush, Mallinckrodt, Endo), each in two versions that differ in exactly one token: a real matter token (Raptor, Schiavo, Exalgo, Opana ER) versus a fictional one of the same shape (Tercel, Petrossi, Veltrano, Veltrex ER). The request describes the conduct and never names the token. <em>Signal</em> pairs: a case-aware reader calls the real version relevant more often. <em>Decoy</em> pairs (Azurix, FCAT, Ofirmev, Lidoderm): the real token is something a case-aware reader knows is <em>not</em> what was asked, so knowledge should lower the call. <mark>The decoy design is what separates knowledge from a generic "real-looking name" effect, and the signal − decoy contrast is the number to quote.</mark></p>
+
+<div class="box warn"><b>The v1 confound.</b> v1 sent each matter's task-YAML context as written. A word-boundary audit of every T1 token against the context and all request fields found the Mallinckrodt context named Exalgo, Roxicodone, Methadose and the decoys Ofirmev, INOmax, Acthar ("branded opioids including…", "non-opioid products (e.g.…) that are not at issue"), and the Endo context named Opana ER, Qualitest and the decoys Lidoderm, Voltaren Gel, Aveed, Supprelin. <mark>On those two matters a real token could match the <em>prompt</em> rather than training knowledge, in both directions.</mark> Check C had shown the same thing independently (with the original Endo context Jev followed counterfactual text 57 % of the time; 90 % with a nameless one). <b>v2</b> replaced the two contexts with the product-nameless versions written for Check C, re-ran Mallinckrodt and Endo on all four systems ($0.51), carried Enron and Jeb Bush over unchanged (their prompts were already token-free), and <code>Matter.taskset()</code> now raises if any token appears in a context or request. v1 is archived at <code>results/jev_probe/t1_v1_confounded/</code>.</div>
+
+<figure>
+<img src="article/codename_swap.png" alt="Code-name swap">
+<figcaption><b>Figure 6. Code-name swap (T1 v2): change in "relevant" rate, real minus fictional token, 95 % paired bootstrap.</b> Left: signal pairs (a case-aware reader should favour the real token). Right: decoy pairs (it should not). Jev signal Δ: Enron +17.9 [+3.6, +32.1], Jeb Bush +34.8 [+13.0, +56.5], Mallinckrodt +63.2 [+42.1, +84.2], Endo +10.5 [+0.0, +26.3]; the LLMs span +7.1 to +78.9. Jev's decoy Δ is negative on three matters and <b>+25 pp on Mallinckrodt</b> (real pharmaceutical brands in a marketing e-mail read as more likely opioid than invented ones — a real-brand effect, which is why the contrast, not the raw Δ, is quoted). Signal − decoy contrast excludes zero on 4 of 4 matters for Jev (+26, +47, +38, +36). v1 → v2 moved Endo most (Jev +36.8 → +10.5; Luna +57.9 → +15.8), the signature of the prompt confound.</figcaption>
+</figure>
+
+<p><b>Reading.</b> <mark>With token-free prompts the classifier's call still depends on recognising real-world tokens at effect sizes within the LLMs' range on three of four matters.</mark> This is inconsistent with a reading of the vendor statement under which Jev has no real-world knowledge, and consistent with either pre-training on public text or synthetic training data generated by a model that has that knowledge; the test cannot separate those two, and it does not show benchmark contamination: knowing what Exalgo is, is not having seen the Mallinckrodt collection. The bare-token check (FAS 140: a header plus one sentence with Raptor/LJM2/Chewco vs invented twins) gives 0 % / 0 % with the request as written and 78 % / 0 % once the criteria name the vehicles, so the ablation's −18 F1 on FAS 140 under renaming is not a bare-name reflex but Jev reading request and document together.</p>
+
+<details><summary>T2–T4: Jev shows no sign of remembering documents or labels</summary><div>
+<ul>
+<li><b>T2 minimal-edit label flip</b> (~100 documents per public-qrels collection, a 1–2-sentence Luna edit intended to flip true relevance; Veridian with our own labels as calibrator). Label-following rate — calls on the edited document equal to the <em>old</em> label: Jev 20 % [13, 29] Enron, 30 % [22, 40] Jeb Bush, 46 % [36, 56] Veridian; LLMs 27–31 %, 32–36 %, 41–50 %. Jev minus Veridian: Enron −26.2 [−38.8, −13.4], Jeb Bush −15.7 [−29.8, −1.6]. Instrument caveat: Terra confirms the intended flip on only 4/10, 5/10, 7/10 sampled edits, which dilutes every system equally within a collection. Consistent with no memorisation of the published judgments.</li>
+<li><b>T3 paraphrase sensitivity</b> (Jev only; ~100 documents each from Enron, Endo, Veridian, original vs Luna paraphrase). Mean |Δp| / call-flip rate: Enron 0.006 / 0.7 %, Endo 0.012 / 0.9 %, Veridian 0.006 / 0.4 %. Enron vs Veridian Mann–Whitney p = 0.75; Endo vs Veridian p &lt; 0.001 — the only corpus that differs is the one that cannot have been seen, so its larger shift is document style. Consistent with no document memorisation.</li>
+<li><b>T4 published vs unpublished labels.</b> Enron: 144 qrels documents vs 144 length-matched EDRM messages in no qrels, labelled by a Luna + Terra unanimous panel; Jeb Bush: 1,639 judged pairs vs 1,639 unjudged twins, 6-LLM panel reference. Confound stated first: judged documents are pool-selected, so only by-reference-label cells are informative. Jev accuracy vs qrels 74 % [67, 81] / 76 % [74, 78]; Jev agreement with the LLM panel on the same judged documents 92 % / 86 % (panel vs qrels 78 % / 86 %). A system that had memorised the qrels would agree with the qrels more than with an LLM panel; Jev does the reverse on both collections. Consistent with no label memorisation, pool selection as the binding limit on power.</li>
+</ul>
+<p>Overall: <mark>Jev <em>uses</em> real-world matter knowledge (T1) and shows no sign of <em>remembering</em> the benchmark's documents or labels (T2–T4)</mark>. Both halves are evidence, not proof.</p>
+</div></details>
+
+<!-- ================================================================ -->
+<h2 id="s4">4. Test 2 — have the models memorised the documents?</h2>
+
+<p>The document-level battery (Part I) has four channels, each with Veridian as the floor and the founding documents / Titanic as the ceiling. Three are quick to state; the fourth, verbatim continuation, carries most of the design decisions and is treated at length.</p>
+
+<table>
+<tr><th>Channel</th><th>Probe</th><th>Items per corpus</th><th>Score</th><th>Headline (Sol; Luna/Terra in the report)</th></tr>
+<tr><td><b>E</b> entity knowledge</td><td><code>entity_recall</code> "Who is {name} (active c. {era})? Organisation and role, or UNKNOWN"; <code>entity_recog</code> yes/no/unknown for the true org and three foils</td><td>30 header names in three frequency tiers × 4 orgs</td><td>Target-org hit rate; d′ from hits vs foil false alarms</td><td>Recall names the org for 3–13 % of Enron names (Dasovich, Belden, Whalley, Lavorato, Kean), 0 % Mallinckrodt, 0 % Endo; recognition d′ Enron 2.2, Mallinckrodt 1.6 (30 % hits, 0 % FA: Harper, Buist, Tetzlaff — real employees named in MDL filings), Jeb Bush 1.4, Veridian 0.5, framers 4.8. Terra at <code>effort=none</code> is a yes-sayer (63–80 % foil false alarms), so only its d′ is readable.</td></tr>
+<tr><td><b>B</b> benchmark knowledge</td><td>"List the topics of TREC 2016 athome4", "Describe TREC Legal 2010 topics 301–304", "List the CUAD clause categories", …</td><td>6 free-text questions</td><td>Share of true topic titles recovered</td><td>TREC topics 0/34 and 0/4 for every model, with confident confabulation; CUAD 41/41 categories for every model; 20/20 newsgroups (ceiling). The benchmark's <em>questions</em> are not in these models for the TREC arms.</td></tr>
+<tr><td><b>L</b> label memorisation</td><td>"In {collection}, was document {id} judged relevant to topic {n} '{title}'?" — no document text</td><td>100 (id, topic) pairs, balanced within topic</td><td>Accuracy vs 50 %</td><td>45–54 % everywhere on the eDiscovery corpora; Titanic 70 / 75 / 84 % (the probe detects leakage when it exists). A sampling confound was caught and fixed: the first build balanced labels across the whole corpus and Sol scored 70 % on Mallinckrodt by answering "relevant" to every <code>*_broad</code> issue — the question text carried label information.</td></tr>
+<tr><td><b>V</b> verbatim memorisation</td><td>Headers + first ~45 % of the body → "the next ~60 words exactly as in the original"</td><td>60 screened windows (Big Thorium 48)</td><td>Word-level LCS-F1 and longest exact run vs the true continuation; n-grams already in the prefix earn no credit; number-blind novelty test</td><td>See below</td></tr>
+</table>
+
+<h3>Verbatim continuation: design, pool quality, scoring</h3>
+<p>The probe is the reproduction test from <em>NYT v. OpenAI</em> applied to review collections: show the model the start of a document and ask it to finish it exactly. Two scores per window: <b>LCS-F1</b>, the F1 of the longest common word subsequence between the model's 60 words and the true continuation (0 = nothing shared, 1 = every word in order), and the <b>longest exact run</b> of consecutive matching words, with the <b>novel</b> variant counting only runs that contain a 5-gram absent from the prompt (digits masked). The run statistic is the diagnostic one: genre-predictable text (contract boilerplate, machine-written marketing prose) inflates LCS-F1 without producing long party-specific runs, and <mark>the ≥ 15-word run threshold is where boilerplate stops being able to supply the right specific tokens</mark>.</p>
+
+<p><b>Pool quality.</b> The first pool was 60 random windows per corpus, and inspection of its high scorers showed three kinds of chaff: boilerplate (disclaimers, signatures, forwarded-header blocks, out-of-office replies), public text reproduced inside the corpus (Federal Register notices, statutes, press releases, newsletters), and low-information windows (header-only openings; continuations predictable from the prefix such as tables, attendee lists and repeated error logs). The e-mail corpora's longest run — Sol reproducing 34 consecutive words of a Mallinckrodt e-mail — turned out to be a DEA Paperwork Reduction Act notice quoted in the e-mail: memorisation of the Federal Register, not of the collection. Two filters are now applied by builder and scorer alike: a rules layer (<code>boilerplate.py</code>: disclaimer, signature, quoted header, unsubscribe, auto-reply, scanner notice, protective-order legend, degenerate repetition, key:value lists, tabular, OCR garbage, thin prefix, and two corpus-frequency guards from an 8-gram document-frequency index) and an LLM screen (Luna at temperature 0 assigns <code>original_internal</code> / <code>public_reproduction</code> / <code>template_boilerplate</code> / <code>low_information</code>; only the first enters the pool; verdicts cached in <code>v_screen.jsonl</code>). The ceiling texts are exempt from <code>public_reproduction</code> by design. Replacement windows are drawn deterministically until the pool is 60; the resumable runner executes only the new ids. Effect: e-mail-corpus LCS-F1 moved by ≤ 0.05, mean longest runs fell from 3–4 words to 2.1–2.6, and <mark>no e-mail window in the final pool has a ≥ 15-word run for any model</mark> (longest 10, a sales report whose parallel structure the prompt gives away).</p>
+
+<p><b>Refusals.</b> A review-page inspection found Luna continuations beginning "I'm sorry, but I can't provide the continuation of a private email…" untagged, because the old detector tested for a straight apostrophe and GPT-5.6 uses a curly one (4 of 37 caught). The new detector requires a first-person refusal opening <em>and</em> a named withheld object within 30 words, categorised private / copyright / other; candidate phrasings were clustered from the data. Only Luna refuses, and sharply by corpus: Veridian 25 %, Endo 15 %, Mallinckrodt 3 %, Enron 0 %, founding documents 0 %. Modern-looking product-liability e-mail reads as "private" regardless of whether it is real. Treatment: every V statistic is computed over answered items; the refusals-as-zero mean is kept as <code>lcs_f_mean_all</code>. Under the old convention the undetected refusals, concentrated on the floor corpus, had deflated Luna's floor to 0.135 and made Enron look significantly above it (p = 0.001); <mark>on answered items the floor is 0.152 and no e-mail corpus is above it for Luna (p = 0.16–0.53)</mark>.</p>
+
+<figure>
+<img src="article/verbatim_spectrum.png" alt="Verbatim spectrum">
+<figcaption><b>Figure 7. Finish-the-passage overlap (LCS-F1 of the next 60 words) by collection and model, answered items only; small percentages are the share of windows with an exact ≥ 15-word run.</b> The green band is the Veridian floor across the three models (0.145–0.168). Every e-mail collection sits in or beside the band (Enron 0.165 / 0.157 / 0.170, p vs floor 0.16 / 0.07 / 0.38; Jeb Bush p 0.53 / 0.02 / 0.93; Mallinckrodt p 0.47 / 0.51 / 0.91; Endo p 0.17 / 0.69 / 0.98). Big Thorium is above the band (0.20–0.22, rules-only) but with 3–4-word runs and nothing ≥ 15: machine-written prose is predictable without being remembered. CUAD is clearly above (0.248 / 0.268 / 0.295, p &lt; 10⁻⁹; ≥ 15-word runs 0 / 5 / 10 %). The founding documents are the ceiling (0.36 / 0.63 / 0.94; ≥ 15-word runs 25 / 67 / 98 %) and show the scale gradient the real corpora only hint at.</figcaption>
+</figure>
+
+<h3>Four cards on a gradient</h3>
+<p>The cards render one window each with the prompt, the true continuation and the model's output, exact-match spans highlighted. Together they show what each level of the spectrum looks like on the page.</p>
+
+<div class="grid2">
+<figure><img src="article/card_constitution_sol.png" alt="Constitution card"><figcaption><b>Figure 8a. Ceiling.</b> Sol finishes Article I of the Constitution word for word: 60 of 60 words in one exact run, LCS-F1 1.0.</figcaption></figure>
+<figure><img src="article/card_dasilvamoore_sol.png" alt="Da Silva Moore card"><figcaption><b>Figure 8b. In between.</b> <em>Da Silva Moore v. Publicis Groupe</em> (S.D.N.Y. 2012), the first opinion approving predictive coding. Sol reproduces the famous 21-word sentence exactly, then invents a plausible paragraph that is not in the opinion: LCS-F1 0.47, longest run 21. Luna 0.08; Terra returned an empty response (scored 0, not a refusal). Chosen from six public legal texts probed at $0.025 (<code>article/between_passages.json</code>): Marbury (0.96 / 0.90 / 0.90), Brown (0.21 / 0.96 / 0.89) and SOX §302 (0.71 / 0.99 / 0.99) were recited near-perfectly; Zubulake (0.14 / 0.06 / 0.14) and Enron's 2000 10-K (0.14 / 0.15 / 0.18) sat at the floor.</figcaption></figure>
+<figure><img src="article/card_jebbush_sol.png" alt="Jeb Bush card"><figcaption><b>Figure 8c. Floor, real collection.</b> Given the first half of a Jeb Bush e-mail, Sol's longest correct run is two words. The output is fluent, on-topic and wrong in every particular.</figcaption></figure>
+<figure><img src="article/card_bigthorium_sol.png" alt="Big Thorium card"><figcaption><b>Figure 8d. Floor, public synthetic collection.</b> Sol's best of 48 Big Thorium windows: an 8-word run of sales boilerplate, LCS-F1 0.29, no recitation. This is what "above the floor on LCS-F1 but no memorisation" looks like.</figcaption></figure>
+</div>
+
+<figure>
+<img src="article/verbatim_federal_register_card.png" alt="Federal Register card">
+<figcaption><b>Figure 9. The exclusion that motivated the LLM screen.</b> A Mallinckrodt e-mail that pastes a DEA Paperwork Reduction Act notice; Sol recites 34 consecutive words. Retained in the first pass as "embedded public text", then excluded as <code>public_reproduction</code>: it measures memorisation of the Federal Register, not of the collection.</figcaption>
+</figure>
+
+<h3>What non-recitation does and does not prove</h3>
+<div class="box warn"><mark>Failing to recite does not prove a model never saw a document. Memorisation tracks repetition, not presence</mark>: the Enron corpus is in The Pile, so presence in training is likely, and single-exposure e-mails are evidently not reproduced even by the largest model, while the Federalist Papers (replicated millions of times) are. The verbatim result is therefore "no evidence of document-level memorisation under a probe that does detect memorisation elsewhere" (the canon, Titanic, CUAD), not "the model has not read the e-mails". The calibration note of 2026-10-04 changed every write-up to that wording. The consequence for review accuracy is measured directly in Test 3, which is why the study does not rest on this test. CUAD remains the one collection where memorised text is present, and its paraphrase arm (§5) is the test of whether that text does anything.</div>
+
+<p><b>Endo as the real-world post-cutoff check.</b> A production published after every model's cutoff, from a matter they can know: V LCS-F1 0.15 / 0.14 / 0.15 against Veridian's 0.13–0.17; entity recall 0/30; recognition d′ 0.6 / −1.1 / −0.7; label recall 47–52 %; but M0 identified by all three and M1 70 / 55 / 70 %. <mark>The clearest "known case, unseen documents" profile in the study</mark>, Enron's pattern from the other side, and the recommended held-out benchmark going forward (caveat: its gold is a three-OpenAI-model panel).</p>
+
+<!-- ================================================================ -->
+<h2 id="s5">5. Test 3 — does knowing the case change the score?</h2>
+
+<h3>Definition and sign convention</h3>
+<p>Classify a fixed sample twice — once as-is (<em>named</em>), once with every person, organisation and place consistently replaced by invented ones (<em>renamed</em>) — and compare F1 per request, paired by document. Renaming has a mechanical cost of its own (the model loses nothing it knows but has to read unfamiliar tokens), so the raw Δ is never the quantity of interest. Two subtractions remove it:</p>
+<div class="box">
+<p style="margin:4px 0"><b>Knowledge effect</b> = ΔF1(renamed − named) on <em>matter</em> requests − ΔF1(renamed − named) on <em>control</em> requests, on the same documents, drawn jointly in each bootstrap resample.</p>
+<p style="margin:4px 0"><b>Sign.</b> <mark>Negative = the real names were worth something on the matter requests (renaming hurt them more than it hurt the controls).</mark> Zero = they were not. Positive = renaming hurt the controls more, which is noise or a renamer artefact, not knowledge.</p>
+<p style="margin:4px 0"><b>Cross-corpus variant</b> (when no in-corpus control exists): ΔF1(corpus) − ΔF1(Veridian renamed), the pure renaming floor. Loose, because the two renamers are different treatments; used for CUAD and as a secondary column elsewhere.</p>
+</div>
+
+<p>Matter vs control requests: Enron Complaint J (seven TREC 2010 requests: prepay transactions, FAS 140, financial analysts, document destruction, energy schedules, financial forecasts, plus fantasy football as an in-mailbox control) versus Complaint K on the same mailbox (an unrelated oil-spill fact pattern, three requests); Jeb Bush matter topics (recount 2000, Rilya Wilson, Medicaid reform, George W. Bush, Terri Schiavo — the events the M1/M2 probes produced unprompted) versus seven control topics no model recited (Movie Gallery, condominiums, bottled water, marketing, faith-based, NRA ×2); Big Thorium requests 1–6 (the aiR criteria partitioned) versus 7–8 (nuclear compliance, remote work).</p>
+
+<h3>The renamer</h3>
+<p><code>ediscovery_bench/ablation/names.py</code> (<code>Renamer</code>) is a deterministic dictionary with four classes: <b>phrases</b> (organisations, products, places, domains; longest-first, case-insensitive), <b>rare surnames</b> (replaced wherever capitalised), <b>common-word surnames</b> (words that are also English words — Lee, Park, Grant, Reid — replaced only in full-name position after a known first name or on header lines), and <b>first names</b> (kept by design: "Ken" alone carries no identification). E-mail display names, Lotus paths and Exchange aliases are handled; local parts follow the surname. Enron's people table was harvested from header fields (≈ 2,300 surnames); Jeb Bush's maps the Governor and family, the 2000 tickets and litigation, and 715 public figures while keeping Florida, Tallahassee, agencies and statutes (renaming the state would break the topical relevance of most requests); CUAD's <code>ContractRenamer</code> maps parties and their defined-term aliases, products, signature-block people, US-state jurisdictions, every date (year shifted −3..+3 per contract) and every dollar amount (× 0.6–1.5, re-rounded). <b>v2 fixes</b> (2026-10-06, after the audit in §7): <mark>bare short forms of mapped products (Apex → Summit), request-named surnames forced into the replace-everywhere class, role words (Counsel, Manager, General, Quality) excluded from the name tables</mark>, title and initial positions ("Dr. Feld", "D. Mitchell"), three-letter surnames in local parts (<code>mlee@</code> → <code>mhan@</code>), underscore as a word boundary. The Big Thorium mapping was built with v2 and the cast's dictionary-word surnames (Clark, Smith, Baker, Carter, Reed, Archer) forced rare from the start; its residual audit was zero before any renamed run.</p>
+
+<h3>Round 1 — Enron J vs K, Veridian, Mallinckrodt brief (2026-10-03; Veridian re-run 2026-10-06)</h3>
+
+<table>
+<tr><th>System</th><th>ΔF1 Enron J</th><th>ΔF1 Enron K</th><th>ΔF1 Veridian (v2)</th><th>Knowledge effect J − K</th><th>J − Veridian</th></tr>
+<tr><td>Luna</td><td>−0.2 [−2.0, +1.6]</td><td>−1.8 [−4.1, +0.3]</td><td>−0.1 [−1.0, +0.7]</td><td>+1.6 [−1.2, +4.6]</td><td>−0.1 [−2.1, +1.9]</td></tr>
+<tr><td>Terra</td><td>−2.0 [−4.4, +0.1]</td><td>+0.6 [−1.5, +2.7]</td><td>−0.4 [−1.2, +0.5]</td><td>−2.6 [−5.8, +0.5]</td><td>−1.7 [−4.1, +0.6]</td></tr>
+<tr><td>Sol</td><td>+1.1 [−0.9, +2.9]</td><td>−1.0 [−2.6, +0.7]</td><td>−1.0 [−1.9, −0.2] <span class="sig">†</span></td><td>+2.1 [−0.6, +4.6]</td><td>+2.1 [−0.0, +4.1]</td></tr>
+<tr><td>Jev</td><td>−1.7 [−3.6, +0.1]</td><td>−1.7 [−3.6, +0.2]</td><td>−0.3 [−0.8, +0.2]</td><td>+0.0 [−2.6, +2.6]</td><td>−1.4 [−3.4, +0.4]</td></tr>
+</table>
+
+<figure>
+<img src="article/knowledge_effect.png" alt="Enron knowledge effect">
+<figcaption><b>Figure 10. Enron knowledge effect, one dot per system</b>: ΔF1 on the scandal requests minus ΔF1 on the Complaint K control requests, 95 % bootstrap over documents. No interval excludes zero and the LLMs' signs disagree (+1.6, −2.6, +2.1; Jev +0.0). Renaming flips 2–5 % of labels. The leak check puts this in perspective: shown renamed Enron J e-mails with headers stripped and the ticker mapped, the models still said Enron for 60.5 / 81.5 / 93.5 % of 200 (Luna / Terra / Sol), and for 48 / 77 / 94 % of the 77 documents with no knowledge-bearing name at all — from Houston, the 2001 dates, the trading vocabulary. The Δ is therefore a lower bound, and the names are not the channel.</figcaption>
+</figure>
+
+<figure>
+<img src="article/pr_options/option2.png" alt="Enron precision-recall before and after renaming">
+<figcaption><b>Figure 11. Enron scandal requests, precision (y) against recall (x), one panel per system.</b> Filled = original names, hollow = renamed; shaded boxes are 95 % bootstrap intervals (1,000 resamples over documents); dashed curves are constant F1; the arrow joins the two means and F1 before → after is printed. n = 142 e-mails for each of 6 requests = 852 paired decisions per condition. Every arrow is shorter than its box.</figcaption>
+</figure>
+
+<p><b>Dose–response on Enron J</b> (ΔF1 by number of knowledge-bearing names per document, 0 / 1–2 / 3+): Luna +1.0 / +0.7 / −2.3, Terra −0.2 / −2.6 / −4.3 [−7.9, −1.0], Sol +3.1 [+0.5, +5.9] / −1.6 / −0.5, Jev −1.7 / +0.0 / −2.5. <mark>Terra is the one system with a monotone pattern; Sol's gain on zero-name documents runs the other way.</mark> <b>In-mailbox control</b> (fantasy football): Δ −0.7 / +1.4 / −0.1 / +0.0.</p>
+
+<p><b>Jev on FAS 140</b> (round 1's loose end): <mark>ΔF1 −18.2 [−27.6, −10.4], 12 positives lost and none gained</mark>, 7 of the 12 naming Raptor/Talon/LJM2/Chewco (p 0.5–0.6 → 0.1–0.4), while Terra and Sol gained +13.6/+16.4 on the same request. The bare-token check (§3) showed this is not a name reflex; T1 showed the knowledge is used when the token sits in substantive text.</p>
+
+<h3>Round 2 — CUAD (rename + paraphrase) and Jeb Bush (2026-10-04; Terra added 2026-10-06)</h3>
+
+<p><b>CUAD</b> needed a second perturbation. What the models hold here is the <em>text</em> (document-level memorisation and all 41 clause categories), so renaming parties cannot remove it; paraphrase (GPT-5.6 Luna at temperature 0, a strict preservation prompt, deterministic checks on numbers, quoted terms, capitalised-term recall ≥ 0.8 and length ratio, one retry; Terra judges legal equivalence on a sample: 89/100) removes the memorised surface, which the finish-the-document probe confirms directly: <mark>Sol's LCS-F1 on the paraphrased windows fell 0.315 → 0.279 and ≥ 15-word runs 10 % → 6 %, while renaming left it at 0.302 / 9 %</mark>. Sample: every positive-bearing excerpt (718) plus 482 negatives over all 102 contracts = 1,200 excerpts × 12 clause requests; cluster bootstrap by contract. Controls: within-CUAD dose–response against a per-contract memorisation score (primary) and the identical paraphrase pipeline on 500 Veridian documents (secondary; different genre, stated).</p>
+
+<table>
+<tr><th>System</th><th>ΔF1 renamed</th><th>ΔF1 paraphrased</th><th>Veridian renamed (v2)</th><th>Veridian paraphrased</th><th>Rename effect (CUAD − Ver.)</th><th>Paraphrase effect (CUAD − Ver.)</th></tr>
+<tr><td>Luna</td><td>−0.6 [−1.6, +0.4]</td><td>−1.3 [−2.7, −0.0] <span class="sig">†</span></td><td>−0.1 [−0.9, +0.6]</td><td>−0.5 [−1.8, +0.7]</td><td>−0.4 [−1.7, +0.7]</td><td>−0.8 [−2.6, +1.0]</td></tr>
+<tr><td>Terra</td><td>−0.7 [−1.7, +0.3]</td><td>−0.3 [−1.5, +0.9]</td><td>−0.4 [−1.2, +0.4]</td><td>−0.3 [−1.6, +0.9]</td><td>−0.3 [−1.6, +1.0]</td><td>+0.1 [−1.6, +1.7]</td></tr>
+<tr><td>Sol</td><td>+0.2 [−0.8, +1.2]</td><td>−0.4 [−1.4, +0.5]</td><td>−1.0 [−1.9, −0.2] <span class="sig">†</span></td><td>+1.0 [−0.1, +2.2]</td><td>+1.2 [−0.1, +2.5]</td><td>−1.4 [−2.9, +0.0]</td></tr>
+<tr><td>Jev</td><td>+0.0 [−0.6, +0.7]</td><td>−0.3 [−1.2, +0.6]</td><td>−0.3 [−0.9, +0.3]</td><td>−0.3 [−1.4, +0.8]</td><td>+0.3 [−0.5, +1.3]</td><td>−0.0 [−1.4, +1.5]</td></tr>
+</table>
+<p>No dose–response: Δ does not grow with the contract's memorisation score for any system or perturbation (Spearman ρ −0.02 … +0.20, none significant). Luna's −1.3 † paraphrase Δ coincides with the clause types the fidelity judge flagged as not legally equivalent (change_of_control 2/5, license_grant 2/10, anti_assignment 2/11, ip_ownership 1/7, non_compete 1/6, insurance 1/2 — 11/100), so it is consistent with ≈ 10 % infidelity rather than knowledge. <mark><b>Before the Veridian fix</b> the rename-effect column read +2.2 †, +2.5 †, +1.9 † for Terra, Sol and Jev; those were artefacts of the leaky v1 floor and are withdrawn.</mark> Reading: CUAD results rest on clause-type competence; perturbing the memorised surface moves F1 by about a point, no more than on an unseen corpus, and no more on the contracts the models remember best.</p>
+
+<figure>
+<img src="ablation/round2/fig_cuad.png" alt="CUAD forest">
+<figcaption><b>Figure 12. CUAD round-2 forest</b>: ΔF1 for renamed and paraphrased CUAD, the Veridian renamed and paraphrased controls, the two net effects, and the Big Thorium renamed row as a second floor (shown, not subtracted). Every interval through zero except Luna's paraphrase Δ (fidelity caveat) and Sol's Veridian rename Δ.</figcaption>
+</figure>
+
+<p><b>Jeb Bush.</b> 1,000 e-mails from the study's eval sample (up to 60 gold positives per request, the rest hard-negative and random strata), 12 requests asked of every document in one call, same documents in both conditions. Renaming removes identification of the people, not the state: the Governor and family (Jeb Bush → Cal Weston), the 2000 tickets and litigation (Bush v. Gore → Weston v. Hartwell), the people named in the requests, senior staff and 715 public figures; residual Jeb/Bush in body text: 0 of 1,000.</p>
+
+<table>
+<tr><th>System</th><th>ΔF1 all</th><th>ΔF1 matter</th><th>ΔF1 control</th><th>Knowledge effect (matter − control)</th><th>ΔRecall matter</th><th>ΔPrecision matter</th></tr>
+<tr><td>Luna</td><td>−0.8 [−1.9, +0.2]</td><td>−0.2 [−2.1, +1.5]</td><td>−1.3 [−2.5, −0.0] †</td><td>+1.0 [−1.2, +3.2]</td><td>−2.6 [−4.6, −1.0] †</td><td>+1.6 [−1.0, +4.3]</td></tr>
+<tr><td>Terra</td><td>−0.3 [−1.3, +0.7]</td><td>−1.6 [−3.2, +0.1]</td><td>+0.7 [−0.6, +2.0]</td><td><span class="sig">−2.3 [−4.3, −0.3] †</span></td><td>−2.6 [−4.5, −1.0] †</td><td>−0.9 [−3.0, +1.4]</td></tr>
+<tr><td>Sol</td><td>−0.2 [−1.1, +0.7]</td><td>−0.2 [−1.6, +1.2]</td><td>−0.3 [−1.5, +1.0]</td><td>+0.1 [−1.8, +1.9]</td><td>−0.3 [−2.1, +1.3]</td><td>−0.1 [−1.9, +1.8]</td></tr>
+<tr><td>Jev</td><td>−0.5 [−1.6, +0.6]</td><td>−2.4 [−4.7, −0.2] †</td><td>+0.7 [−0.1, +1.6]</td><td><span class="sig">−3.1 [−5.5, −0.8] †</span></td><td>−6.2 [−9.1, −3.4] †</td><td>+3.7 [+1.2, +6.5] †</td></tr>
+</table>
+
+<div class="grid2">
+<figure><img src="article/pr_options/jebbush_matter.png" alt="Jeb Bush matter topics PR"><figcaption><b>Figure 13a. Jeb Bush matter topics</b> (recount, Rilya Wilson, Medicaid reform, George W. Bush, Schiavo): 1,000 e-mails × 5 requests = 5,000 paired decisions per condition. Luna, Terra and Jev all lose recall (−2.6, −2.6, −6.2); only Terra's and Jev's survive the control subtraction, because Luna loses as much on the quiet topics.</figcaption></figure>
+<figure><img src="article/pr_options/jebbush_control.png" alt="Jeb Bush control topics PR"><figcaption><b>Figure 13b. The same documents, control topics</b> (7 requests no model recited; 7,000 paired decisions per condition). This is what renaming costs when there is no case knowledge to remove on this collection; the knowledge effect is 13a minus 13b.</figcaption></figure>
+</div>
+
+<figure>
+<img src="ablation/round2/fig_jeb.png" alt="Jeb Bush forest">
+<figcaption><b>Figure 14. Jeb Bush round-2 forest</b> with the per-topic breakdown. Terra's loss sits on the George W. Bush topic (−5.8 [−11.3, −0.6] †) and is spread thinly elsewhere; McNemar over all 12,000 pairs p = 0.81 (35 right→wrong, 32 wrong→right). Jev's loss is concentrated in documents with 0–2 public-figure mentions (−4.7, −2.5) and absent at 3+: it is the few anchoring names (Gore, Harris, Rilya) that matter, not the count of renamed tokens. The Big Thorium renamed row is shown as the second floor.</figcaption>
+</figure>
+
+<div class="box key"><b>Terra's −2.3 is small but real, and the Veridian fix changed how it is read.</b> Before the renamer audit, Terra's Veridian renaming cost read −2.9 †, and the −2.3 on Jeb Bush could be described as "of the order of the renaming floor". <mark>With the v2 Veridian floor at −0.4 [−1.2, +0.5], the −2.3 is clearly larger than the mechanical cost of renaming</mark>, the control topics on the same documents moved the other way (+0.7), and the loss sits on one topic (George W. Bush) whose request still says "the President (2001–2009), Texas governor". It is the first LLM interval in the study to sit off zero and of the size the earlier lower bounds always allowed. Jev's −3.1 is of the same kind: familiarity with public figures helping a classifier match documents to requests, consistent with any encoder trained on public-web text and not by itself evidence of training on the collection (T2–T4 address that). It means Jev's Jeb Bush matter-topic scores in the main study run ≈ 2–3 F1 points higher than they would on a matter whose cast it did not know.</div>
+
+<p><b>Leak check on the renamed sets</b> (<code>bench ablation2-leak</code>, 2026-10-06, 756 answers): shown renamed Jeb Bush e-mails and asked whose collection they come from, <mark>Luna said Jeb Bush for 104/150 (69 %), Terra 128/150 (85 %), Sol 141/150 (94 %)</mark> — from <code>myflorida.com</code>, Tallahassee and the policy context. Shown one renamed CUAD excerpt per contract and asked which real companies signed: 11 / 23 / 33 of 102 named a real party. Together with Enron's 60–94 %, this is why every knowledge effect in the study is a lower bound: renaming removes the names, not the recognition of the case.</p>
+
+<h3>Veridian floor and Big Thorium second floor</h3>
+<div class="grid2">
+<figure><img src="article/pr_options/veridian_rename.png" alt="Veridian rename PR"><figcaption><b>Figure 15a. Veridian, invented names → renamed again (renamer v2, re-run 2026-10-06)</b>: 10 requests × 1,000 e-mails = 10,000 paired decisions per system per condition. ΔF1 −0.1 / −0.4 / −1.0 † / −0.3. This is the pure cost of renaming in this pipeline. Before the fix it read +0.2 / −2.9 † / −2.3 † / −1.9 † (§7).</figcaption></figure>
+<figure><img src="article/pr_options/bigthorium_rename.png" alt="Big Thorium rename PR"><figcaption><b>Figure 15b. Big Thorium (public documents, invented case)</b>: 8 requests × 1,000 e-mails, ≈ 7,900 scorable pairs per system per condition against a leave-one-out panel gold. ΔF1 −1.1 / +0.5 / +0.5 / −0.1, intervals through zero, 0.2–0.6 % of labels change. The Veridian result again, on public documents the study did not write.</figcaption></figure>
+</div>
+
+<table>
+<tr><th>Big Thorium</th><th class="n">named F1</th><th class="n">renamed F1</th><th>ΔF1</th><th>matter Δ</th><th>control Δ</th><th>Knowledge effect</th><th>Brief ΔF1 (n ≈ 2,340)</th></tr>
+<tr><td>Luna</td><td class="n">87.3</td><td class="n">86.1</td><td>−1.1 [−3.6, +1.2]</td><td>−2.7 [−6.5, +0.8]</td><td>+0.7 [−1.9, +3.3]</td><td>−3.4 [−7.8, +0.7]</td><td>−0.8 [−4.3, +2.7]</td></tr>
+<tr><td>Terra</td><td class="n">92.2</td><td class="n">92.6</td><td>+0.5 [−1.2, +2.2]</td><td>+1.0 [−1.8, +4.0]</td><td>+0.0 [−1.5, +1.6]</td><td>+1.0 [−2.0, +4.3]</td><td>−1.8 [−3.9, +0.2]</td></tr>
+<tr><td>Sol</td><td class="n">89.2</td><td class="n">89.6</td><td>+0.5 [−1.1, +2.2]</td><td>+1.0 [−1.5, +3.9]</td><td>−0.2 [−2.2, +1.9]</td><td>+1.3 [−2.0, +4.5]</td><td>+0.6 [−1.1, +2.5]</td></tr>
+<tr><td>Jev</td><td class="n">84.1</td><td class="n">84.0</td><td>−0.1 [−1.9, +1.6]</td><td>+1.9 [−0.7, +4.8]</td><td>−2.3 [−4.6, −0.5] †</td><td><span class="sig">+4.3 [+1.0, +7.8] †</span> (artefact, see below)</td><td>−1.1 [−4.0, +1.7]</td></tr>
+</table>
+
+<div class="box warn"><b>Jev's +4.3 on Big Thorium is a threshold artefact, not knowledge, and is kept out of the article.</b> The sign is wrong for case knowledge (negative would mean names helped on the matter) and the whole effect comes from the control side: on the nuclear-compliance request Jev lost five positives and gained none. <mark>Of Jev's 18 changed labels, 83 % had a named-condition probability within 0.1 of the 0.5 threshold and the mean |Δp| was 0.14, against 0–5 % and 0.6–0.8 for the LLMs.</mark> Renaming nudges the decision model's probabilities by a few hundredths and flips the documents already on the line. The matter requests individually (rfp01 −5.7 … +3.3, rfp04 −6.0 … 0.0) carry intervals of ±10–20 points on 25–37 positives, nothing consistent across systems; a ≈ $15 positive-enrichment run would narrow them (§10).</div>
+
+<h3>Brief injection: adding knowledge instead of removing it</h3>
+<p>The converse manipulation. Append a one-page case brief to the context and classify the same documents again. Three arms: Mallinckrodt (a real brief, 1,840 documents × 8 requests, round 1), Veridian (Check D: a 1,431-token fictional brief — parties, products, people, deals and code names, timeline, outcome — on a stratified 491-document half), Big Thorium (Relativity's own aiR case summary, 1,059 words, on a 300-document positive-enriched subset).</p>
+
+<div class="grid3">
+<figure><img src="article/pr_options/brief_injection.png" alt="Veridian brief PR"><figcaption><b>Figure 16a. Veridian with and without the brief</b> (4,910 paired decisions per system). ΔF1 −0.3 / −0.6 / −1.0 / +0.5; Jev trades −1.9 precision for +3.5 [+1.5, +5.6] recall; 1.2–2.0 % of labels change, McNemar p ≥ 0.16.</figcaption></figure>
+<figure><img src="article/pr_options/brief_injection_mnk.png" alt="Mallinckrodt brief PR"><figcaption><b>Figure 16b. Mallinckrodt with and without the brief</b> (14,720 pairs). ΔF1 −1.0 / −0.7 / +0.6 / +1.3; Jev recall +4.1 [+2.8, +5.4].</figcaption></figure>
+<figure><img src="article/pr_options/bigthorium_brief.png" alt="Big Thorium brief PR"><figcaption><b>Figure 16c. Big Thorium with and without Relativity's aiR summary</b> (≈ 2,340 pairs). ΔF1 −0.8 / −1.8 / +0.6 / −1.1. Luna and Terra trade recall for precision (Luna 97.6 → 92.3 recall, 83.7 → 86.6 precision).</figcaption></figure>
+</div>
+<p>Circularity caveat on the panel-gold arms (Mallinckrodt, Big Thorium): the gold is the panel's <em>without-brief</em> majority, so a system that follows the brief away from the panel is scored as wrong; the brief effect there is a lower bound on agreement change, not an accuracy change. Veridian's gold is independent of the systems. The pattern is the same in all three: <mark>handing a system the one kind of knowledge it cannot have does not move F1 beyond noise; what it buys the decision model is a few points of recall at the cost of precision</mark>.</p>
+
+<div class="box ok"><b>Carry-forward wording.</b> For the LLMs, <em>knowing the case changed review accuracy by at most a few F1 points</em> holds on three matters (Enron, Jeb Bush, CUAD) under three manipulations (remove names, paraphrase, inject a brief); <mark>no knowledge effect beyond 2.6 F1 points; every interval includes zero except Terra on Jeb Bush</mark>. For Jev, a small familiarity effect of ≈ 2–3 points on matter topics built around public figures (Jeb Bush −3.1; FAS 140; the knowledge-dependent Enron documents in Check A), consistent with public-web knowledge of public figures and not by itself evidence of training on the collections. Every effect is a lower bound because renaming is a weak blindfold.</div>
+
+<details><summary>Full round-1 paired table (renamed − named, pooled over knowledge topics)</summary><div>
+<table>
+<tr><th>arm</th><th>model</th><th class="n">n pairs</th><th class="n">F1 named</th><th class="n">F1 renamed</th><th>ΔF1</th><th>ΔRecall</th><th>ΔPrecision</th><th class="n">r→w</th><th class="n">w→r</th><th class="n">McNemar p</th></tr>
+<tr><td>enron_j</td><td>Luna</td><td class="n">994</td><td class="n">0.793</td><td class="n">0.791</td><td>−0.2 [−2.0, +1.6]</td><td>+0.0 [−2.5, +2.5]</td><td>−0.5 [−2.3, +1.3]</td><td class="n">21</td><td class="n">19</td><td class="n">0.875</td></tr>
+<tr><td>enron_j</td><td>Terra</td><td class="n">994</td><td class="n">0.753</td><td class="n">0.733</td><td>−2.0 [−4.4, +0.1]</td><td>−2.2 [−5.1, +0.7]</td><td>−1.5 [−3.1, −0.1]</td><td class="n">28</td><td class="n">15</td><td class="n">0.066</td></tr>
+<tr><td>enron_j</td><td>Sol</td><td class="n">994</td><td class="n">0.797</td><td class="n">0.808</td><td>+1.1 [−0.9, +2.9]</td><td>+1.7 [−1.1, +4.3]</td><td>+0.2 [−1.5, +1.7]</td><td class="n">18</td><td class="n">25</td><td class="n">0.36</td></tr>
+<tr><td>enron_j</td><td>Jev</td><td class="n">994</td><td class="n">0.718</td><td class="n">0.701</td><td>−1.7 [−3.6, +0.1]</td><td>−2.2 [−4.6, +0.0]</td><td>−0.3 [−2.0, +1.3]</td><td class="n">19</td><td class="n">10</td><td class="n">0.136</td></tr>
+<tr><td>enron_k</td><td>Luna</td><td class="n">999</td><td class="n">0.618</td><td class="n">0.600</td><td>−1.8 [−4.1, +0.3]</td><td>−2.0 [−4.3, +0.2]</td><td>+0.1 [−1.9, +2.3]</td><td class="n">25</td><td class="n">16</td><td class="n">0.211</td></tr>
+<tr><td>enron_k</td><td>Terra</td><td class="n">999</td><td class="n">0.515</td><td class="n">0.521</td><td>+0.6 [−1.5, +2.7]</td><td>+0.8 [−1.0, +2.8]</td><td>−1.9 [−4.5, +0.3]</td><td class="n">15</td><td class="n">15</td><td class="n">1</td></tr>
+<tr><td>enron_k</td><td>Sol</td><td class="n">999</td><td class="n">0.621</td><td class="n">0.611</td><td>−1.0 [−2.6, +0.7]</td><td>−1.0 [−2.8, +0.9]</td><td>−0.5 [−1.9, +0.7]</td><td class="n">15</td><td class="n">9</td><td class="n">0.307</td></tr>
+<tr><td>enron_k</td><td>Jev</td><td class="n">999</td><td class="n">0.573</td><td class="n">0.556</td><td>−1.7 [−3.6, +0.2]</td><td>−1.6 [−3.5, +0.2]</td><td>−0.7 [−2.7, +1.3]</td><td class="n">19</td><td class="n">10</td><td class="n">0.136</td></tr>
+<tr><td>veridian</td><td>Luna</td><td class="n">10000</td><td class="n">0.810</td><td class="n">0.809</td><td>−0.1 [−1.0, +0.7]</td><td>+0.2 [−0.5, +0.8]</td><td>−0.3 [−1.4, +0.9]</td><td class="n">72</td><td class="n">67</td><td class="n">0.735</td></tr>
+<tr><td>veridian</td><td>Terra</td><td class="n">10000</td><td class="n">0.838</td><td class="n">0.834</td><td>−0.4 [−1.2, +0.5]</td><td>−0.1 [−1.0, +0.7]</td><td>−0.5 [−1.5, +0.6]</td><td class="n">63</td><td class="n">53</td><td class="n">0.403</td></tr>
+<tr><td>veridian</td><td>Sol</td><td class="n">10000</td><td class="n">0.826</td><td class="n">0.816</td><td>−1.0 [−1.9, −0.2]</td><td>−1.1 [−2.1, −0.1]</td><td>−0.9 [−2.0, +0.1]</td><td class="n">79</td><td class="n">54</td><td class="n">0.037</td></tr>
+<tr><td>veridian</td><td>Jev</td><td class="n">10000</td><td class="n">0.865</td><td class="n">0.862</td><td>−0.3 [−0.8, +0.2]</td><td>−0.1 [−0.9, +0.7]</td><td>−0.5 [−1.1, +0.2]</td><td class="n">22</td><td class="n">15</td><td class="n">0.324</td></tr>
+<tr><td>mnk ± brief</td><td>Luna</td><td class="n">14720</td><td class="n">0.768</td><td class="n">0.758</td><td>−1.0 [−1.8, −0.2]</td><td>−0.1 [−0.8, +0.7]</td><td>−1.3 [−2.3, −0.4]</td><td class="n">209</td><td class="n">154</td><td class="n">0.0045</td></tr>
+<tr><td>mnk ± brief</td><td>Terra</td><td class="n">14720</td><td class="n">0.850</td><td class="n">0.843</td><td>−0.7 [−1.5, +0.1]</td><td>+0.7 [−0.2, +1.6]</td><td>−1.8 [−2.9, −0.6]</td><td class="n">140</td><td class="n">104</td><td class="n">0.025</td></tr>
+<tr><td>mnk ± brief</td><td>Sol</td><td class="n">14720</td><td class="n">0.827</td><td class="n">0.833</td><td>+0.6 [−0.1, +1.3]</td><td>+0.8 [+0.1, +1.6]</td><td>+0.5 [−0.5, +1.4]</td><td class="n">113</td><td class="n">137</td><td class="n">0.146</td></tr>
+<tr><td>mnk ± brief</td><td>Jev</td><td class="n">14720</td><td class="n">0.835</td><td class="n">0.849</td><td>+1.3 [+0.5, +2.3]</td><td>+4.1 [+2.8, +5.4]</td><td>−1.4 [−2.5, −0.4]</td><td class="n">88</td><td class="n">116</td><td class="n">0.058</td></tr>
+</table>
+</div></details>
+
+<details><summary>Big Thorium per-request ΔF1 (named → renamed)</summary><div>
+<table>
+<tr><th>Request</th><th>Luna</th><th>Terra</th><th>Sol</th><th>Jev</th></tr>
+<tr><td>rfp01_atlantis_rfp</td><td>−5.7 [−12.5, +2.2]</td><td>+0.0 [−5.3, +4.8]</td><td>+3.3 [+0.0, +8.9]</td><td>+0.0 [−5.2, +5.2]</td></tr>
+<tr><td>rfp02_gifts</td><td>+0.0</td><td>+2.6 [+0.0, +9.1]</td><td>+0.0</td><td>+9.7 [+0.0, +27.1]</td></tr>
+<tr><td>rfp03_officials</td><td>−1.0 [−5.2, +3.4]</td><td>+2.6 [−2.7, +7.8]</td><td>+1.5 [−2.0, +5.6]</td><td>+1.5 [−1.6, +4.9]</td></tr>
+<tr><td>rfp04_contract</td><td>−6.0 [−21.9, +7.4]</td><td>−2.2 [−11.5, +6.8]</td><td>−3.0 [−12.5, +4.8]</td><td>+0.0 [−23.5, +23.5]</td></tr>
+<tr><td>rfp05_third_party</td><td colspan="4">no panel positives; unscored</td></tr>
+<tr><td>rfp06_investigation</td><td>+0.0</td><td>+0.0</td><td>+0.0</td><td>+3.0 [+0.0, +9.4]</td></tr>
+<tr><td>rfp07_nuclear_compliance (control)</td><td>+0.0 [−2.9, +2.9]</td><td>+0.0 [−2.1, +2.0]</td><td>−0.8 [−3.3, +1.4]</td><td>−2.7 [−5.4, −0.6] †</td></tr>
+<tr><td>rfp08_remote_work (control)</td><td>+2.7 [−2.4, +8.7]</td><td>+0.0</td><td>+1.4 [+0.0, +5.1]</td><td>−1.5 [−5.4, +0.0]</td></tr>
+</table>
+<p class="small">Panel positives per request: 37, 19, 76, 25, 0, 13, 122, 38. Check against the demo's human coding (document level): panel recall 15/18; per-system recall of the 18 human positives 0.78 / 0.78 / 0.83 / 0.67 named, unchanged or +0.05 renamed.</p>
+</div></details>
+
+<!-- ================================================================ -->
+<h2 id="s6">6. Generalisation checks A–D</h2>
+
+<p>Four checks on the central claim — <em>on the matters tested, knowing the case did not detectably change review accuracy</em> — chosen so that each could have undermined it (<code>bench verify</code>, <code>ediscovery_bench/verify/</code>; new spend $10.95 of a $15 cap plus $0.12 Jev).</p>
+
+<table>
+<tr><th>Check</th><th>Design</th><th>What it would show if contamination helped</th><th>Result</th><th>Verdict</th></tr>
+<tr><td><b>A</b> Knowledge-dependence error analysis (Enron J)</td><td>Luna tags every scored document as <em>knowledge-dependent</em> (relevance visible only with outside Enron knowledge) or <em>self-contained</em>; tags describe documents, are shared across systems, and the tagger is itself a system under test</td><td>Higher named accuracy on KD documents and a larger named→renamed drop on them</td><td>6.9 % [5.4, 8.9] of documents are KD (FAS 140 25 %, everything else ≤ 8 %). Named accuracy on KD documents 61 / 61 / 64 / 66 % vs 83 / 81 / 83 / 78 % on self-contained; Jev, with the least measurable case knowledge, is the most accurate on them. ΔF1 on the KD subset +4.1 / +4.0 / <b>+17.3 [+4.8, +32.1]</b> (Sol: renaming <em>helped</em>) / −15.7 [−33.3, −0.7] (Jev, 5 r→w vs 2 w→r on 59 documents)</td><td class="ok"><b>Strengthens.</b> What the channel could affect is a small slice, and on it no system behaves as if knowledge were helping; the LLMs' edge over Jev sits on self-contained documents</td></tr>
+<tr><td><b>B</b> Ranking stability (existing results, no calls)</td><td>Rank order of systems across corpora; F1 against each LLM's own case-knowledge composite</td><td>A stable ranking that favours the LLMs more on better-known matters</td><td>Kendall W over F1 ranks 0.14 across 5 corpora × 4 systems (p ≈ 0.56; four objects give W almost no power). Within each LLM, F1 vs own case score ρ 0.0 / −0.2 / −0.2. The mean-LLM − Jev gap <em>widens monotonically</em> with case knowledge: Enron J (case 84) +6.3 → Mallinckrodt (53) −2.0 → Veridian (0) −4.1</td><td class="warn"><b>Ambiguous, leans against.</b> The gap pattern is what contamination predicts, but equally what corpus type predicts (human-judged e-mail at 49 % prevalence vs panel and planner gold at 10 %); A and D test the mechanism directly on both ends and find none. The weakest design; reported because it did not come out clean</td></tr>
+<tr><td><b>C</b> Counterfactual conflict documents</td><td>30 templated documents per matter in FACTUAL and COUNTERFACTUAL versions, the latter contradicting a well-known fact so that relevance to a nameless request flips (Roxicodone as "our over-the-counter antacid"); product-nameless contexts for Mallinckrodt and Endo</td><td>Calls following world knowledge rather than the text, more for pre-trained facts than for in-context ones</td><td>Factual versions read at ≥ 97 %. Knowledge-following on counterfactuals, pooled over four real matters: Luna 17 %, Terra 14 %, Sol 12 %, Jev 8 %; almost entirely one-directional (a hot token keeps a document responsive: 27 / 24 / 18 / 15 %; the reverse 4 / 2 / 4 / 0 %); concentrated on Jeb Bush, Mallinckrodt, Endo; near zero on Enron. Veridian analogue (in-context facts contradicted): 17 / 10 / 3 / 10 %; no system's real-matter rate differs from its Veridian rate beyond noise</td><td class="warn"><b>Mixed, neutral.</b> The strong form of the claim ("knowledge plays no role in the call") is false: systems let prior facts outweigh the page on engineered conflicts, Jev least, Luna most. But no more for pre-trained than in-context facts, and A says such conflicts are rare on real documents</td></tr>
+<tr><td><b>D</b> Knowledge injection on Veridian</td><td>A 1,431-token fictional brief appended to the context; 491-document stratified half; paired against the existing named run</td><td>Higher F1 when the only possible source of case knowledge is supplied</td><td>ΔF1 −0.3 [−1.7, +1.1] / −0.6 [−2.1, +0.8] / −1.0 [−2.6, +0.5] / +0.5 [−1.1, +2.2]; Jev recall +3.5 [+1.5, +5.6] against −1.9 precision; 1.2–2.0 % labels change; McNemar p ≥ 0.16. Same picture as Mallinckrodt and Big Thorium briefs</td><td class="ok"><b>Strengthens.</b> Narrow intervals, paired, same mechanism as the ablation; the strongest signal of the four</td></tr>
+</table>
+
+<div class="grid2">
+<figure><img src="verify/fig_a_knowledge_dependence.png" alt="Check A"><figcaption><b>Figure 17. Check A.</b> Named accuracy and renamed−named ΔF1 on knowledge-dependent vs self-contained Enron J documents, four systems. Every system is <em>less</em> accurate on the documents where knowledge could matter.</figcaption></figure>
+<figure><img src="verify/fig_b_ranking_stability.png" alt="Check B"><figcaption><b>Figure 18. Check B.</b> F1 by system across corpora ordered by the LLMs' case-knowledge composite. Rank order is unstable; the mean-LLM − Jev gap tracks case knowledge and corpus type alike.</figcaption></figure>
+<figure><img src="verify/fig_c_counterfactual_conflict.png" alt="Check C"><figcaption><b>Figure 19. Check C.</b> Text-following rate on factual vs counterfactual versions, per matter and system, with the Veridian in-context baseline. Overrides are real, one-directional, and no larger for pre-trained than for in-context facts.</figcaption></figure>
+<figure><img src="verify/fig_d_knowledge_injection.png" alt="Check D"><figcaption><b>Figure 20. Check D.</b> ΔF1, ΔP, ΔR with the Veridian brief, four systems, with the Big Thorium brief effect overlaid as open triangles. Nothing moves beyond noise; the decision model trades precision for recall.</figcaption></figure>
+</div>
+
+<p><b>Overall.</b> The two checks that test the mechanism directly (A: where knowledge could matter, does it? D: when knowledge is supplied, does it?) come out for the claim; C shows the channel exists but is small and no larger for pre-trained than for in-context facts; B is the one check whose surface pattern runs the other way and it cannot separate case knowledge from corpus type. Carry-forward wording: <em><mark>on the matters tested, knowing the case did not detectably change review accuracy, including when the knowledge was supplied in the prompt</mark>; the systems can be made to override a document with a well-known fact, but such conflicts are rare in real collections and the effect did not reach accuracy.</em></p>
+
+<!-- ================================================================ -->
+<h2 id="s7">7. Renamer audit</h2>
+
+<p>Prompted by a result that should not have happened: Veridian is entirely fictional, so renaming its invented names to other invented names should cost nothing, yet <mark>in the v1 run Terra and Sol lost 2–3 F1 points with intervals off zero</mark>. The user asked whether the same could be true elsewhere. Every renamed and paraphrased set was audited without API calls (<code>results/ablation/renamer_audit.md</code>) for five classes of defect, and per-request recall losses were tied back to the documents carrying residuals.</p>
+
+<table>
+<tr><th>Leak class</th><th>What it looks like</th><th>Why it mimics lost knowledge</th></tr>
+<tr><td>Unmapped short form or alias</td><td>"ApexHip" → "SummitHip" but bare "Apex" left; "SIGA" for SIGA Technologies</td><td>The renamed request says Summit; the document says Apex; the model reads a mixed document and the match fails</td></tr>
+<tr><td>Common-word surname rule too conservative</td><td>"Dr. Feld", "Feld's", bare "Rao" left because Feld and Rao were on the common-word list (replaced only after a first name or on header lines)</td><td>The request names Dr. Brandt; the body still says Dr. Feld</td></tr>
+<tr><td>Over-replacement of ordinary words</td><td>"General Counsel" → "General Wexham"; "Scheduling" → "Melwick"; "Gov. Gray Davis" → "Lanford. Gray Harwood"; "Tuesday, May 16" → "Tuesday, Strounan 16"</td><td>Role words and dates lose meaning; a request about energy schedules cannot find "Scheduling"</td></tr>
+<tr><td>E-mail local-part residue</td><td><code>mlee@</code> beside the renamed display name "Marcus Han"</td><td>Identification leak; a careful reader sees two names for one person</td></tr>
+<tr><td>Request / document inconsistency</td><td>Requests renamed with one mapping, documents with another, or unrenamed fields passed through</td><td>Direct mismatch; checked and clean on every arm (Jeb's unused <code>structured</code>/<code>subparts</code> fields are the only pass-through)</td></tr>
+</table>
+
+<h3>Per-set findings</h3>
+<table>
+<tr><th>Set</th><th>Issue</th><th>Docs affected</th><th>Requests affected</th><th>Severity</th><th>Action</th></tr>
+<tr><td rowspan="4">Veridian renamed (v1)</td><td>bare <code>Apex</code> unmapped</td><td>246 / 1,000</td><td>rfp13, 07, 03, 09, 01, 08</td><td><b>headline</b></td><td rowspan="4"><b>Fixed (renamer v2) and re-run</b>, $14.21</td></tr>
+<tr><td><code>Feld</code>, <code>Rao</code> left as Dr. Feld / Feld's / bare</td><td>81 / 60 (109 union)</td><td>rfp07, 03, 08</td><td><b>headline</b></td></tr>
+<tr><td>old e-mail local parts beside new display names</td><td>144 (224 addresses)</td><td>spread</td><td>minor</td></tr>
+<tr><td>General Counsel → General Wexham 27; Quality Manager → Harhurst 5; Barr → Barr; D. Mitchell 4</td><td>—</td><td>—</td><td>cosmetic</td></tr>
+<tr><td rowspan="3">Enron J / K renamed</td><td><code>Enron</code> / <code>ENE</code> / <code>enron.com</code> residue</td><td>0 / 0</td><td>—</td><td>none</td><td rowspan="3">Not re-run ($9.4 optional): KE on clean documents +1.2 / +1.8 / −1.0 / 0.0 vs published +1.6 / +2.1 / −2.6 / 0.0; every interval through zero either way</td></tr>
+<tr><td>header-derived ordinary words replaced as surnames: Scheduling → Melwick 18, Gov. → Lanford. 19/24, May → Strounan 12/10, Management → Rosman, Businesses → Dunman</td><td>69 / 68</td><td>energy_schedules (J): 9 of 18 lost positives in mangled docs</td><td>specific request</td></tr>
+<tr><td>identifiers kept or missed: 1400 Smith 42/31, EOL 13/15, Houston, Texas (by design)</td><td>55 / 45</td><td>—</td><td>cosmetic</td></tr>
+<tr><td rowspan="3">Jeb Bush renamed</td><td><code>Jeb</code> / <code>Bush</code> in body text</td><td>0</td><td>—</td><td>none</td><td rowspan="3">Not re-run: KE on the 958 clean documents +0.9 / +0.6 / −2.5 / −2.9 vs +1.1 / +0.1 / −2.4 / −3.2; the gw_bush recall drop occurs on clean documents (53 of 60 positives) and is the measured effect</td></tr>
+<tr><td>title + public surname left (Senator Graham, Mayor Hood, Speaker Byrd, Congressman Foley); two leftover domains</td><td>22 (matter-pos 13/273, control-pos 4/360)</td><td>—</td><td>cosmetic</td></tr>
+<tr><td>Washington → Drayman 49, Vice President → Vice Tolwood 19, Letters to the Editor → Zelgate 7</td><td>66 (matter 24 / control 23, balanced)</td><td>—</td><td>cosmetic</td></tr>
+<tr><td>CUAD renamed</td><td>unmapped acronyms and short names (SIGA, NFLA, KI, HPIL, MINDA/IMPCO, Columbia Laboratories)</td><td>≈ 60 excerpts, 9 contracts</td><td>none (recall on those excerpts unchanged for every system)</td><td>cosmetic</td><td>Identification only; no action</td></tr>
+<tr><td>CUAD paraphrased</td><td>11 / 100 sampled rewrites judged not legally equivalent</td><td>≈ 130 / 1,200 est.</td><td>change_of_control, license_grant, anti_assignment, ip_ownership, non_compete, insurance</td><td>specific request</td><td>Caveat on Luna's −1.3 † (same clause types); net-of-Veridian contrasts unaffected</td></tr>
+<tr><td>Veridian paraphrased</td><td>49/50 equivalent; recall flat on every request</td><td>—</td><td>—</td><td>none</td><td>Clean control</td></tr>
+</table>
+
+<h3>Veridian before and after</h3>
+<table>
+<tr><th>Residual token</th><th class="n">v1 renamed docs</th><th class="n">v2</th></tr>
+<tr><td>bare Apex</td><td class="n">246</td><td class="n">0</td></tr>
+<tr><td>Feld</td><td class="n">81</td><td class="n">0</td></tr>
+<tr><td>Rao</td><td class="n">60</td><td class="n">0</td></tr>
+<tr><td>Mitchell (initial form)</td><td class="n">4</td><td class="n">0</td></tr>
+<tr><td>General Wexham / Harhurst</td><td class="n">27 / 5</td><td class="n">0 / 0</td></tr>
+<tr><td>old e-mail local parts</td><td class="n">143</td><td class="n">0</td></tr>
+</table>
+<p class="small">Remaining residuals after v2 are English words that are also surnames (Central Park, Lee Hecht Harrison, "Martin Ross"; about a dozen documents), left by design. A 20-document three-way diff (original / v1 / v2) showed only intended substitutions; one new mangle found during checking ("Metro Park" → "Metro Cho") was fixed before the run.</p>
+
+<table>
+<tr><th>System</th><th>Named P / R / F1</th><th>v1 renamed → ΔF1</th><th>v2 renamed → ΔF1 [95 % CI]</th><th>ΔF1 on leak-touched docs (v1)</th><th>ΔF1 on clean docs (v1)</th></tr>
+<tr><td>Luna</td><td>68.9 / 98.3 / 81.0</td><td>70.8 / 95.1 / 81.2 → +0.2</td><td>68.6 / 98.4 / 80.9 → <b>−0.1 [−1.0, +0.7]</b></td><td>−0.5</td><td>+0.7</td></tr>
+<tr><td>Terra</td><td>73.2 / 97.9 / 83.8</td><td>73.1 / 90.4 / 80.8 → −2.9 †</td><td>72.7 / 97.8 / 83.4 → <b>−0.4 [−1.2, +0.5]</b></td><td>−5.0</td><td>−2.0</td></tr>
+<tr><td>Sol</td><td>71.7 / 97.3 / 82.6</td><td>72.0 / 90.7 / 80.3 → −2.3 †</td><td>70.8 / 96.2 / 81.6 → <b>−1.0 [−1.9, −0.2] †</b></td><td>−3.5</td><td>−1.5</td></tr>
+<tr><td>Jev</td><td>84.5 / 88.7 / 86.5</td><td>84.4 / 84.9 / 84.6 → −1.9 †</td><td>84.0 / 88.6 / 86.2 → <b>−0.3 [−0.8, +0.2]</b></td><td>−3.5</td><td>+0.2</td></tr>
+</table>
+<p><mark>120 of the 138 responsive documents the four systems lost after v1 renaming (on the six requests with a ≥ 5-point recall drop) were in leak-touched documents</mark>; documents containing both Apex and Feld/Rao lost ≈ 14 F1 points for Terra and Sol. The recall column tells the story most plainly: v1 ΔRecall −3.2 / −7.5 / −6.6 / −3.8 became +0.2 / −0.1 / −1.1 / −0.1.</p>
+
+<h3>What moved downstream, and what did not</h3>
+<ul>
+<li>Round-1 "ΔF1(J) − ΔF1(Veridian)" column: Sol +3.4 † → +2.1 [−0.0, +4.1].</li>
+<li>Round-2 "rename effect: CUAD − Veridian": Terra +2.2 † → −0.3, Sol +2.5 † → +1.2 [−0.1, +2.5], Jev +1.9 † → +0.3; all through zero. <mark>The "CUAD renaming artefact" the study had been explaining disappeared with the floor.</mark></li>
+<li>Δ(Jeb all) − Δ(Veridian): all through zero.</li>
+<li>The sentence reading Terra's Jeb Bush −2.3 as "of the order of the Veridian floor" is withdrawn; the floor is −0.4.</li>
+<li><b>Unchanged:</b> the Enron and Jeb Bush knowledge effects (same-collection controls, no Veridian dependence); <mark>the headline (within ±2.6, one of nine LLM intervals off zero)</mark>; every verbatim, entity, label and matter-knowledge result.</li>
+<li>Sol keeps a small genuine renaming cost on Veridian (−1.0, interval just off zero) — the allowance to make when reading Sol's renaming results.</li>
+</ul>
+
+<div class="box key"><b>Two methodological lessons.</b> (1) <mark><em>A leaky perturbation mimics lost knowledge exactly.</em></mark> A document with the product renamed in one sentence and not the next looks, to the classifier, like a document about something it half-recognises, and the score drops on precisely the requests that mention the unmapped token. The signature is per-request concentration of recall loss on documents carrying residuals; the remedy is a residual audit to zero <em>before</em> any renamed run (now standard: Big Thorium's mapping was audited to zero first). (2) <em>Renaming is a weak blindfold.</em> Even with a clean renamer, the models attributed renamed Enron e-mails to Enron 60–94 % of the time and renamed Jeb Bush e-mails to his office 69–94 % of the time, from domains, places, dates and vocabulary. Every rename-and-subtract knowledge effect is therefore a lower bound; the brief-injection arms and Check C are the complementary designs that do not depend on blinding.</div>
+
+<!-- ================================================================ -->
+<h2 id="s8">8. Decision log</h2>
+<p>Chronological. Each entry gives the decision and the reason it was taken, as recorded in the design docs and the working transcript.</p>
+
+<dl class="dec">
+<dt>Use Veridian as the floor for every probe; add explicit positive controls after the first pass (2026-10-03).</dt>
+<dd><span class="why">The first draft used Enron as the verbatim ceiling on the grounds that it is in The Pile. The run showed single-exposure e-mails are not reproduced even by the largest model, so a corpus whose status was the thing under test could not serve as a ceiling. The founding documents (Project Gutenberg) and the Kaggle Titanic CSV were added: text replicated millions of times, so saturation is guaranteed and <mark>the scale gradient (Luna 0.36 → Terra 0.63 → Sol 0.94) calibrates every other reading</mark>.</span></dd>
+
+<dt>Treat the vendor's "trained on synthetic data" statement as a claim under test, never a premise.</dt>
+<dd><span class="why">The study compares Jev with the LLMs; assuming the comparison system is clean would beg the question. Jev is run through every arm its interface allows (ablation, M3, T1–T4, checks A/C/D), and every result is reported as consistent or inconsistent with the statement. The T1 result (real-world token knowledge at LLM-scale effect sizes) is compatible with the statement only if the synthetic data was generated by a model that has that knowledge, which is the natural way to make such data; the test cannot separate the two.</span></dd>
+
+<dt>Rebuild the verbatim pool with a rules layer plus an LLM screen (2026-10-04).</dt>
+<dd><span class="why">Inspection of the top-scoring windows showed boilerplate, embedded public text (the 34-word Federal Register run) and prompt-copyable continuations. A good V item is custodian-authored, matter-specific text with an unpredictable continuation. Verdicts are cached so re-runs are free; replacement windows cost $0.57. Conclusions held on the better pool; the ceiling texts are exempt from the public-reproduction class by design.</span></dd>
+
+<dt>Score verbatim statistics over answered items only; report refusals separately (2026-10-04).</dt>
+<dd><span class="why">Only Luna refuses, and it refuses most on the floor corpus (25 % on Veridian), so scoring refusals as zero deflated the floor and made Enron look significantly above it. A refusal is a policy reading, not a memorisation reading.</span></dd>
+
+<dt>Balance label-recall pairs within topic, not across the corpus.</dt>
+<dd><span class="why">Sol scored 70 % on Mallinckrodt by answering "relevant" to every <code>*_broad</code> topic; the question text carried label information. Pairs are now balanced per topic and the report prints the topic-only ceiling (50 %) beside the accuracy.</span></dd>
+
+<dt>Define the knowledge effect as a within-corpus difference (matter − control on the same documents), with the Veridian floor as a secondary cross-corpus column.</dt>
+<dd><span class="why">Renaming has a mechanical cost that differs by corpus and renamer. The same-documents subtraction removes it exactly; the Veridian subtraction removes it only approximately (different treatment), which is why the Veridian renamer defect could distort the cross-corpus columns without touching the Enron or Jeb Bush knowledge effects.</span></dd>
+
+<dt>Strip EDRM production headers (X-SDOC, X-ZLID) from both Enron conditions.</dt>
+<dd><span class="why">The leak check showed models naming Enron from them. Stripping in both conditions keeps the pair comparable.</span></dd>
+
+<dt>Add a second perturbation (paraphrase) for CUAD; measure the removed surface directly.</dt>
+<dd><span class="why">CUAD is the one corpus with document-level memorisation and benchmark knowledge; renaming parties cannot remove memorised text. The finish-the-document probe on the paraphrased windows (Sol 0.315 → 0.279; ≥ 15-word runs 10 % → 6 %) proves the paraphrase removed what it was meant to remove, so the null effect on F1 is informative.</span></dd>
+
+<dt>Rename Jeb Bush's people, not Florida.</dt>
+<dd><span class="why">Renaming the state would break the topical relevance of most requests (Tallahassee, DCF, AHCA, Florida statutes). The mapping removes identification of the Governor, his family, the 2000 litigation and 715 public figures; the leak check then measures what is left (69–94 % still identified).</span></dd>
+
+<dt>Run round 2 as the cheap version first (Terra dropped under the $75 rule), add Terra when the key was topped up (2026-10-04 → 10-06).</dt>
+<dd><span class="why">Budget rule: full > $75 → run the version without the mid model first; Luna and Sol span the price/quality range and Sol carries the strongest memorisation signal. Terra's six runs ($26.62, each within 2 % of estimate) completed the table and produced the one off-zero LLM interval.</span></dd>
+
+<dt>Redesign T1 with token-free contexts (v2) and assert it in code (2026-10-04).</dt>
+<dd><span class="why">A prompt audit found the Mallinckrodt and Endo task contexts named the very tokens being swapped, in both signal and decoy roles, so a real token could match the prompt. Check C had found the same independently. The v2 contexts are the product-nameless ones written for Check C; Enron and Jeb Bush predictions are carried over because their prompts were already clean; v1 is archived. <mark>The reading holds via the signal − decoy contrast (4 of 4 off zero in both versions).</mark></span></dd>
+
+<dt>Run the four generalisation checks as designs that could each undermine the claim (2026-10-04).</dt>
+<dd><span class="why">A claim defended only by the experiments that produced it is weak. A and D test the mechanism directly; B is the weakest design and is reported because it came out ambiguous; C shows the strong form of the claim is false and bounds how much that matters.</span></dd>
+
+<dt>Calibrate every write-up against overclaiming (2026-10-04).</dt>
+<dd><span class="why">Standard: state what was observed, name the inference it supports, say what would overturn it. "They have not read the e-mails" → "no evidence of document-level memorisation under a probe that detects it elsewhere"; "the effect is zero" → a bound with intervals through zero; "every model, every matter" → "26 of 27, the miss named"; correlations reported per model with significance.</span></dd>
+
+<dt>Audit every renamed set when the Veridian result looked wrong; fix and re-run only Veridian (2026-10-06).</dt>
+<dd><span class="why">Fictional-to-fictional renaming cannot cost 2–3 points. <mark>The audit tied 87 % of lost positives to residual tokens.</mark> Veridian is the floor for three published columns, so it was re-run ($14.21). Enron J/K ($9.4) and Jeb Bush ($15.4) were not: their defects are cosmetic, the knowledge effects on clean documents are the same within noise, and no interval changes status. CUAD's rename residue affects identification only; its paraphrase infidelity is a caveat, not a fix.</span></dd>
+
+<dt>Add Big Thorium as a sixth collection; describe it as public documents, invented case (2026-10-06).</dt>
+<dd><span class="why">A second floor on which document exposure is possible closes the gap between Veridian (private, invented) and CUAD (public, no case). A web search found no indexed page naming the set and the worker first described it as internal; the user confirmed Relativity distributes it as the aiR demo workspace and the wording was corrected everywhere. The empirical point survives either way: no model recites, recognises or recalls it.</span></dd>
+
+<dt>Big Thorium sampling 650 / 150 / 200 with the 18 human positives forced in; panel gold with leave-one-out.</dt>
+<dd><span class="why">Nine in ten messages are off-topic filler, so a random 1,000 would carry too few matter documents; stratifying by matter-keyword / control-keyword / other (seed 20261006) gives the requests enough positives while keeping controls. The demo's own coding (18 positives, one coder, a BBQ invitation marked Responsive) cannot support recall intervals, so the Mallinckrodt/Endo panel procedure is reused with each LLM scored against the other two to remove self-circularity; agreement with the demo coding is reported as a check (15/18).</span></dd>
+
+<dt>Keep Jev's +4.3 Big Thorium "knowledge effect" out of the article.</dt>
+<dd><span class="why">Wrong sign for knowledge, entirely from five control-request positives sitting within 0.1 of the threshold (83 % of Jev's flips vs 0–5 % for the LLMs). It is a surface-token sensitivity of the decision model and is documented in the report with that explanation.</span></dd>
+
+<dt>Reinterpret Terra's Jeb Bush −2.3 after the Veridian fix.</dt>
+<dd><span class="why">With the renaming floor at −0.4 rather than −2.9, the −2.3 can no longer be called renaming cost. It is small but real, and the pages and article say so; the conditional wording in <code>effect2.py</code> and <code>story.py</code> is generated from the data.</span></dd>
+
+<dt>What the article claims and does not claim.</dt>
+<dd><span class="why">Claims: the models know the cases; no document-level memorisation of any e-mail collection; knowing the case changed review accuracy by at most a few F1 points, one of nine LLM intervals off zero; renaming is a weak blindfold so the effects are lower bounds; a brief does not help; Jev carries real-world matter knowledge and a small familiarity effect on public-figure topics, with no sign of memorised documents or labels. <mark>Does not claim: that the models never saw the e-mails; that the effect is zero; that the vendor statement is true or false</mark>; anything about Anthropic or Gemini models; anything beyond these matters at these sample sizes.</span></dd>
+</dl>
+
+<!-- ================================================================ -->
+<h2 id="s9">9. Costs</h2>
+
+<table>
+<tr><th>Phase</th><th>Date</th><th class="n">Realised USD</th><th>Notes</th></tr>
+<tr><td>Contamination probes, Parts I + II + ladder (3 OpenAI models)</td><td>2026-10-03</td><td class="n">14.28</td><td>Part I $3.32, Part II $9.57, ladder $1.39; list prices</td></tr>
+<tr><td>Jev M3 header-only relevance</td><td>2026-10-03</td><td class="n">0.17</td><td>2,900 calls</td></tr>
+<tr><td>Ablation round 1 (Enron J/K, Veridian v1, Mallinckrodt brief; 4 systems)</td><td>2026-10-03</td><td class="n">104.75</td><td>$222.70 list; includes the superseded Veridian v1 run ($14.20)</td></tr>
+<tr><td>Endo corpus, label panel and probes</td><td>2026-10-03</td><td class="n">33.50</td><td></td></tr>
+<tr><td>Classifier-native tests T1–T4</td><td>2026-10-04</td><td class="n">4.64 + 0.15</td><td>OpenAI + Jev; T1 v2 re-run $0.51 under its own $3 cap</td></tr>
+<tr><td>Ablation round 2 (CUAD rename + paraphrase, Jeb Bush; Terra added 10-06; leak checks)</td><td>2026-10-04 / 06</td><td class="n">83.18</td><td>Cheap version $55.79; Terra $26.62 (within 2 % of estimate); leak checks $0.78</td></tr>
+<tr><td>Generalisation checks A–D</td><td>2026-10-04</td><td class="n">10.95 + 0.12</td><td>A 0.30, C 1.67, D 8.98; $15 cap</td></tr>
+<tr><td>Veridian renamed re-run (renamer v2)</td><td>2026-10-06</td><td class="n">14.21</td><td>Luna 0.47, Terra 4.67, Sol 8.92, Jev 0.15; 40,000 rows, 0 errors, 15 min</td></tr>
+<tr><td>Big Thorium (probes + named / renamed / brief, 4 systems)</td><td>2026-10-06</td><td class="n">34.14</td><td>Probes 0.39; runs 33.75 (named 14.01, renamed 14.23, brief 5.51 at 142 % of estimate: longer documents, lower cache hit); $40 cap</td></tr>
+<tr><td>Verbatim pool rebuild, LLM screen, between-passages probe</td><td>2026-10-04 / 06</td><td class="n">≈ 0.85</td><td>Screen 0.25, replacements 0.57, six legal passages 0.025</td></tr>
+<tr><th>Total</th><th></th><th class="n">300.09</th><th>As recorded in <code>design/06</code></th></tr>
+</table>
+<p class="small">Spend ledgers: <code>data/ablation/round2_spend.json</code> (round 2 + Veridian re-run + Big Thorium runs = $131.14), <code>results/verify/llm_spend.jsonl</code>, <code>results/jev_probe/llm_spend.jsonl</code>. The OpenAI key ran out on 2026-10-04 during the leak check and was topped up on 2026-10-06; one Terra run hit a 120-row 429 burst and was resumed ($0.04). Every classification run landed within 2 % of its estimate except Big Thorium's (113–142 %, from document length and cache share).</p>
+
+<!-- ================================================================ -->
+<h2 id="s10">10. Open items, next experiments, reproduction, file map</h2>
+
+<h3>Open items</h3>
+<table>
+<tr><th>Item</th><th>Why it matters</th><th>Cost / effort</th><th>Recommendation</th></tr>
+<tr><td>Anthropic and Gemini keys</td><td>Nothing in the contamination study runs on them; the main eval's Sonnet 5 and Gemini 3.8 Flash results have no exposure measurement</td><td>Probe battery ≈ $5 for the small/mid roster; ablation arms scale with the per-call table in §2</td><td>Run the probes at least; ablation on Jeb Bush if the budget allows</td></tr>
+<tr><td>Big Thorium positive enrichment</td><td>The six matter requests share ≈ 140 scorable positives; per-request intervals are ±10–20 points</td><td>≈ $15</td><td>Optional; not needed for the floor conclusion</td></tr>
+<tr><td>Code-name swap (T1) on Big Thorium</td><td>Would complete the Jev picture on the sixth collection</td><td>≈ $0.50–1.00 per matter</td><td>Cheap; do it when convenient</td></tr>
+<tr><td>Enron J/K renamed re-run with a cleaned people table</td><td>Fixes energy_schedules; moves Terra's Enron KE from −2.6 to ≈ −1.0</td><td>$9.4</td><td>Only if a per-request Enron figure is published</td></tr>
+<tr><td>Better blindfolds than renaming</td><td>60–94 % of renamed documents are still identified from domains, places, dates and vocabulary; every knowledge effect is a lower bound</td><td>Design work: date shifting, domain and place mapping, vocabulary-preserving paraphrase of the whole document; or the converse design (brief injection, Check C) extended to real matters</td><td>The most important methodological gap</td></tr>
+<tr><td>Post-cutoff EDGAR contract sample</td><td>The genre-matched floor CUAD lacks; would close the boilerplate gap in the verbatim probe</td><td>≈ 2 weeks of a single lawyer-reviewer for 20 contracts; API cost ≈ $14 per 1,200 excerpts</td><td>Listed since round 2; the right next control for contracts</td></tr>
+<tr><td>Label noise</td><td>Panel gold is partly circular for the panel members (marked †); TREC qrels are pool-selected (T4's binding limit); the demo coding is one coder</td><td>A human-labelled unjudged Enron panel: ≈ 300 documents × 6 requests, two reviewers, ≈ 20 reviewer-hours</td><td>Would remove the LLM-panel dependence in T4</td></tr>
+<tr><td>Full de-identification of Enron J</td><td>Listed pending in <code>design/06</code></td><td>≈ $40–50</td><td>Low priority given the leak-check result</td></tr>
+<tr><td>M3 power</td><td>2 of 18 LLM intervals clear zero; the probe has little power to detect people-knowledge in any system</td><td>Larger paired samples</td><td>Only if a people-channel claim is needed</td></tr>
+</table>
+
+<h3>Reproduction</h3>
+<pre><code># contamination probes (Parts I, II, ladder) — resumable, deterministic builds
+bench contam-build                     # data/contam/probes.jsonl (seed 7); rules + LLM screen for the V pool
+bench contam-run -m gpt-5.6-luna -y    # per model; default roster is the six small/mid LLMs
+bench contam-report                    # results/contam/summary.json + REPORT.md
+bench contam-html && bench contam-paper   # contamination_report.html, paper.html, explainers, split reports
+bench contam-review                    # verbatim_review.html (side-by-side continuations)
+bench contam-jev                       # M3 header-only relevance on Jev
+
+# ablation round 1 (Enron J/K, Veridian, Mallinckrodt brief)
+bench ablation-build && bench ablation-leak
+bench ablation-run [--pilot] [--model jev@base]
+bench ablation-run --arm veridian --condition renamed    # the 2026-10-06 v2 re-run
+bench ablation-report
+
+# ablation round 2 (CUAD, Jeb Bush)
+bench ablation2-build && bench ablation2-paraphrase && bench ablation2-memo
+bench ablation2-run -m gpt-5.6-luna -m gpt-5.6-terra -m gpt-5.6-sol -m jev@base
+bench ablation2-leak -m gpt-5.6-luna -m gpt-5.6-terra -m gpt-5.6-sol
+bench ablation2-report
+
+# classifier-native tests and generalisation checks
+bench jev-probe build | run | report
+bench verify
+
+# Big Thorium
+bench bigthorium extract && bench bigthorium build
+bench bigthorium run -k named && bench bigthorium goldify && bench bigthorium run -k renamed -k brief
+bench bigthorium score
+bench bigthorium probe-build && bench bigthorium probe-run && bench bigthorium probe-score
+
+# figures and pages used by the articles
+.venv/bin/python /tmp/pr_options.py "$PWD"       # PR small multiples -> results/contam/article/pr_options/
+.venv/bin/python /tmp/render_v7.py "$PWD"        # article_v7.html
+.venv/bin/python /tmp/build_gallery.py "$PWD"    # gallery.html</code></pre>
+
+<h3>File map</h3>
+<table>
+<tr><th>Path</th><th>Contents</th></tr>
+<tr><td><code>design/06_contamination_probe.md</code></td><td>Design, pre-registered expectations, findings, method notes, calibration note, classifier-native tests, checks A–D, running total</td></tr>
+<tr><td><code>design/07_ablation_round2.md</code></td><td>CUAD and Jeb Bush design and results; cost table; renamer audit summary; §C Big Thorium</td></tr>
+<tr><td><code>design/05_jev_recipe.md</code>, <code>design/04_run_plan.md</code></td><td>Jev recipe selection; the main eval's grid</td></tr>
+<tr><td><code>ediscovery_bench/contam/</code></td><td>build, run, score, llm, boilerplate, screen, ladder, matter, effect, effect2, verify_summary, html, paper, story, split, bigthorium, jevnative</td></tr>
+<tr><td><code>ediscovery_bench/ablation/</code></td><td>build, names (Renamer v2), jeb_names, cuad_names, paraphrase, round2, round2_score, score, bigthorium</td></tr>
+<tr><td><code>ediscovery_bench/jevprobe/</code>, <code>ediscovery_bench/verify/</code>, <code>ediscovery_bench/bigthorium/extract.py</code></td><td>T1–T4; checks A–D; ARM archive extraction (Avro/Snappy, audit log)</td></tr>
+<tr><td><code>results/contam/</code></td><td><code>REPORT.md</code>, <code>summary.json</code>, <code>bigthorium_summary.json</code>, <code>scored_items.jsonl</code>, <code>v_screen.jsonl</code>, the HTML reports, <code>gallery.html</code>, articles v3–v7, <code>article_v5_CHANGELOG.md</code>, this file</td></tr>
+<tr><td><code>results/contam/article/</code></td><td>All figures; <code>pr_options/</code> (PR small multiples, <code>pr_data.json</code>); <code>banner/</code>; <code>between_passages.json</code></td></tr>
+<tr><td><code>results/ablation/</code></td><td><code>REPORT.md</code>, <code>summary.json</code>, <code>renamer_audit.md</code>, <code>leak_check.jsonl</code>; <code>round2/</code> (REPORT, summary, fig_cuad, fig_jeb); <code>bigthorium/</code> (REPORT, summary, renamer_audit.json, runs); <code>veridian/multi/leaky_v1/</code> (superseded v1 outputs)</td></tr>
+<tr><td><code>results/verify/</code>, <code>results/jev_probe/</code></td><td>Checks A–D with figures; T1–T4 with <code>t1_v1_confounded/</code> archived</td></tr>
+<tr><td><code>data/ablation/</code></td><td><code>mapping.json</code> (v2), <code>jeb_mapping.json</code>, <code>cuad_mapping.json</code>, <code>bigthorium_mapping.json</code>, renamed and paraphrased twins, <code>veridian__renamed.leaky_v1.jsonl</code>, briefs, <code>round2_spend.json</code>, sampling records</td></tr>
+<tr><td><code>data/bigthorium/raw/SOURCES.md</code></td><td>Big Thorium provenance and inventory (raw archive git-ignored)</td></tr>
+<tr><td><code>tasks/*.yaml</code></td><td>Requests, descriptions and contexts per collection (<code>bigthorium.yaml</code> added 2026-10-06)</td></tr>
+</table>
+
+<p class="small" style="margin-top:40px">Figures not used here, deliberately: the five Enron chart design variants and the banners (presentation only), and <code>knowledge_effect_jebbush.png</code> / <code>knowledge_effect_cuad.png</code>, which predate Terra's round-2 runs and the Veridian fix and carry stale numbers; their round-2 replacements are Figures 12 and 14.</p>
+
+</main>
+</body>
+</html>
